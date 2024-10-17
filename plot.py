@@ -23,7 +23,25 @@ def plot_ellipsoid(ax, eigenvalues, eigenvectors, center, color):
             z[i, j] += center[2]
     ax.plot_surface(x, y, z, color=color, alpha=0.3)
 
-def get_color(score):
+def ua_get_color(score):
+    if 1 <= score <= 2:
+        return 'green'
+    elif 3 <= score <= 4:
+        return 'orange'
+    elif 5 <= score <= 6:
+        return 'red'
+    else:
+        return 'purple'  # Other scores in purple
+
+def la_get_color(score):
+    if 1 <= score < 2:
+        return 'green'
+    elif 2 <= score:
+        return 'orange'
+    else:
+        return 'purple'  # Other scores in purple
+
+def trunk_get_color(score):
     if 1 <= score <= 2:
         return 'green'
     elif 3 <= score <= 4:
