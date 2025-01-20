@@ -351,7 +351,7 @@ def objective_function(x):
 
     manip_right = manipulability_z_constraint(x[:4], d_uar, d_lar, arm='right')
     manip_left = manipulability_z_constraint(x[4:], d_ual, d_lal, arm='left')
-    manip_threshold = 5
+    manip_threshold = 4
 
     # if reba_score <= reba_threshold and manip_right >= manip_threshold and manip_left >= manip_threshold:
     #     print("Conditions met for early stopping.")
@@ -703,6 +703,10 @@ if __name__ == '__main__':
 
     updated_robot_left_pose = np.append(updated_robot_left_position, updated_robot_left_rotation)
     updated_robot_right_pose = np.append(updated_robot_right_position, updated_robot_right_rotation)
+
+    updated_robot_left_pose_matrix = quaternion_to_transformation_matrix(updated_robot_left_position, updated_robot_left_rotation)
+    updated_robot_right_pose_matrix = quaternion_to_transformation_matrix(updated_robot_right_position, updated_robot_right_rotation)
+
     # print(updated_robot_left_pose)
     # print(global_positions[8])
     # print(global_positions[5])
