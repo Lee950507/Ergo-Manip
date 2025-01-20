@@ -1,5 +1,5 @@
 import numpy as np
-import rofunc as rf
+import utils
 
 
 class UpperArmDegree:
@@ -7,7 +7,7 @@ class UpperArmDegree:
         self.joints_position = joints_position
 
     def trunk_plane(self):
-        m_body_number = rf.ergolab.body_part_number()
+        m_body_number = utils.body_part_number()
         trunk_joint_numbers = m_body_number.trunk_upper_body()
 
         # finding a plane of upper body
@@ -18,7 +18,7 @@ class UpperArmDegree:
         return normal_plane
 
     def upper_arm_flex(self):
-        m_body_number = rf.ergolab.body_part_number()
+        m_body_number = utils.body_part_number()
         right_upper_arm_joint_numbers = m_body_number.right_arm()
         left_upper_arm_joint_numbers = m_body_number.left_arm()
         trunk_joint_numbers = m_body_number.trunk_whole_body()
@@ -51,7 +51,7 @@ class UpperArmDegree:
         return [flex_right_upper_arm, flex_left_upper_arm]
 
     def upper_arm_abduct(self):
-        m_body_number = rf.ergolab.body_part_number()
+        m_body_number = utils.body_part_number()
         right_upper_arm_joint_numbers = m_body_number.right_arm()
         left_upper_arm_joint_numbers = m_body_number.left_arm()
         trunk_joint_numbers = m_body_number.trunk_whole_body()
@@ -71,9 +71,9 @@ class UpperArmDegree:
 
         spine_vector = self.joints_position[trunk_joint_numbers[3]] - self.joints_position[trunk_joint_numbers[2]]
 
-        right_side_degree = rf.ergolab.get_angle_between_degs(spine_vector, proj_right_upperarm_on_plane)
+        right_side_degree = utils.get_angle_between_degs(spine_vector, proj_right_upperarm_on_plane)
 
-        left_side_degree = rf.ergolab.get_angle_between_degs(spine_vector, proj_left_upperarm_on_plane)
+        left_side_degree = utils.get_angle_between_degs(spine_vector, proj_left_upperarm_on_plane)
 
         if np.dot(np.cross(spine_vector, right_upper_arm_vector), normal_trunk_plane) < 0:
             # if the arm go to the body: adduction
@@ -85,7 +85,7 @@ class UpperArmDegree:
         return [right_side_degree, left_side_degree]
 
     def shoulder_rise(self):
-        m_body_number = rf.ergolab.body_part_number()
+        m_body_number = utils.body_part_number()
         trunk_joint_numbers = m_body_number.trunk_upper_body()
         right_shoulder_joint_numbers = m_body_number.right_shoulder()
         left_shoulder_joint_numbers = m_body_number.left_shoulder()

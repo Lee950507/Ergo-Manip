@@ -518,7 +518,7 @@ if __name__ == '__main__':
 
     # Skeleton Model
     skeleton_joint_name, skeleton_joint, skeleton_parent_indices, skeleton_joint_local_translation = utils.read_skeleton_motion(
-        '/home/ubuntu/Rofunc/examples/data/hotu2/20250103/demo_4_optitrack2hotu.npy')
+        '/home/curi/Chenzui/Ergo-Manip/data/demo_2_test_chenzui_only_optitrack2hotu.npy')
     skeleton_joint = skeleton_joint[300, :]
     global_positions, global_rotations = utils.forward_kinematics(skeleton_joint_local_translation,
                                                                   skeleton_joint, skeleton_parent_indices)
