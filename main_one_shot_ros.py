@@ -572,35 +572,35 @@ def draw_orientation(ax, position, rotation_matrix, scale=0.3):
 
 
 if __name__ == '__main__':
-    rospy.init_node('emo_hrc')
-    subscriber_robot = rospy.wait_for_message('/vrpn_client_node/robot/pose', PoseStamped)
-    subscriber_object = rospy.wait_for_message('/vrpn_client_node/object/pose', PoseStamped)
-    subscriber_shouL = rospy.wait_for_message ('/vrpn_client_node/shouL/pose', PoseStamped)
-    subscriber_shouR = rospy.wait_for_message('/vrpn_client_node/shouR/pose', PoseStamped)
-    subscriber_elbowL = rospy.wait_for_message('/vrpn_client_node/elbowL/pose', PoseStamped)
-    subscriber_elbowR = rospy.wait_for_message('/vrpn_client_node/elbowR/pose', PoseStamped)
-    subscriber_wristL = rospy.wait_for_message('/vrpn_client_node/wristL/pose', PoseStamped)
-    subscriber_wristR = rospy.wait_for_message('/vrpn_client_node/wristR/pose', PoseStamped)
-
-    sub_robot = transform_to_pose(subscriber_robot)
-    sub_object = transform_to_pose(subscriber_object)
-
-    sub_shouL = transform_to_pose(subscriber_shouL)
-    sub_shouR = transform_to_pose(subscriber_shouR)
-    sub_elbowL = transform_to_pose(subscriber_elbowL)
-    sub_elbowR = transform_to_pose(subscriber_elbowR)
-    sub_wristL = transform_to_pose(subscriber_wristL)
-    sub_wristR = transform_to_pose(subscriber_wristR)
-
-    # sub_robot = np.array([-0.2195, 1.11462, 0, 0, 0, 0, 1])
-    # sub_object = np.array([1.3, 1.3, 0, 0, 0, 0, 1])
+    # rospy.init_node('emo_hrc')
+    # subscriber_robot = rospy.wait_for_message('/vrpn_client_node/robot/pose', PoseStamped)
+    # subscriber_object = rospy.wait_for_message('/vrpn_client_node/object/pose', PoseStamped)
+    # subscriber_shouL = rospy.wait_for_message ('/vrpn_client_node/shouL/pose', PoseStamped)
+    # subscriber_shouR = rospy.wait_for_message('/vrpn_client_node/shouR/pose', PoseStamped)
+    # subscriber_elbowL = rospy.wait_for_message('/vrpn_client_node/elbowL/pose', PoseStamped)
+    # subscriber_elbowR = rospy.wait_for_message('/vrpn_client_node/elbowR/pose', PoseStamped)
+    # subscriber_wristL = rospy.wait_for_message('/vrpn_client_node/wristL/pose', PoseStamped)
+    # subscriber_wristR = rospy.wait_for_message('/vrpn_client_node/wristR/pose', PoseStamped)
     #
-    # sub_shouL = np.array([2, 1.5, 0.25, 0, 0, 0, 1])
-    # sub_shouR = np.array([2, 1.5, -0.25, 0, 0, 0, 1])
-    # sub_elbowL = np.array([1.9, 1.3, 0.3, 0, 0, 0, 1])
-    # sub_elbowR = np.array([1.9, 1.3, -0.3, 0, 0, 0, 1])
-    # sub_wristL = np.array([1.8, 1.2, 0.3, 0, 0, 0, 1])
-    # sub_wristR = np.array([1.8, 1.4, -0.3, 0, 0, 0, 1])
+    # sub_robot = transform_to_pose(subscriber_robot)
+    # sub_object = transform_to_pose(subscriber_object)
+    #
+    # sub_shouL = transform_to_pose(subscriber_shouL)
+    # sub_shouR = transform_to_pose(subscriber_shouR)
+    # sub_elbowL = transform_to_pose(subscriber_elbowL)
+    # sub_elbowR = transform_to_pose(subscriber_elbowR)
+    # sub_wristL = transform_to_pose(subscriber_wristL)
+    # sub_wristR = transform_to_pose(subscriber_wristR)
+
+    sub_robot = np.array([-0.2195, 1.11462, 0, 0, 0, 0, 1])
+    sub_object = np.array([1.3, 1.3, 0, 0, 0, 0, 1])
+
+    sub_shouL = np.array([2, 1.5, 0.25, 0, 0, 0, 1])
+    sub_shouR = np.array([2, 1.5, -0.25, 0, 0, 0, 1])
+    sub_elbowL = np.array([1.9, 1.3, 0.3, 0, 0, 0, 1])
+    sub_elbowR = np.array([1.9, 1.3, -0.3, 0, 0, 0, 1])
+    sub_wristL = np.array([1.8, 1.2, 0.3, 0, 0, 0, 1])
+    sub_wristR = np.array([1.8, 1.4, -0.3, 0, 0, 0, 1])
 
     # Transform from optitrack frame to robot frame
     T_optitrack2robotbase = np.linalg.inv(
@@ -664,14 +664,27 @@ if __name__ == '__main__':
     print("init", initial_wrist_position)
 
     # Object & Robot initial EE pose
-    robot_left_pose_init = np.array([0.8, 0.4, 1.4, 0, 0, 0, 1])
-    robot_right_pose_init = np.array([0.8, -0.4, 1.4, 0, 0, 0, 1])
+    robot_left_position_init = object_position_init + np.array([-0.8, 0.3, 0.2])
+    robot_right_position_init = object_position_init + np.array([-0.8, -0.3, 0.2])
+    # robot_left_pose_init = np.array([0.8, 0.4, 1.4, 0, 0, 0, 1])
+    # robot_right_pose_init = np.array([0.8, -0.4, 1.4, 0, 0, 0, 1])
 
-    # Transformation
-    initial_robot_left_pose_matrix = quaternion_to_transformation_matrix(robot_left_pose_init[3:],
-                                                                         robot_left_pose_init[:3])
-    initial_robot_right_pose_matrix = quaternion_to_transformation_matrix(robot_right_pose_init[3:],
-                                                                          robot_right_pose_init[:3])
+    robot_left_rotation_matrix_init = np.array([[1, 0, 0], [0, 0, -1], [0, 1, 0]])
+    robot_right_rotation_matrix_init = np.array([[-1, 0, 0], [0, 0, 1], [0, 1, 0]])
+
+    robot_left_pose_matrix_init = np.r_[np.c_[robot_left_rotation_matrix_init, robot_left_position_init.T], np.array([[0, 0, 0, 1]])]
+    robot_right_pose_matrix_init = np.r_[np.c_[robot_right_rotation_matrix_init, robot_right_position_init.T], np.array([[0, 0, 0, 1]])]
+
+    robot_left_pose_init = np.append(robot_left_position_init, R.from_matrix(robot_left_rotation_matrix_init).as_quat())
+    robot_right_pose_init = np.append(robot_right_position_init, R.from_matrix(robot_right_rotation_matrix_init).as_quat())
+
+    # initial_robot_left_rotation_matrix = np.array([[1, 0, 0, 0.6], [0, 0, -1, 0.3], [0, 1, 0, -0.15], [0, 0, 0, 1]])
+    # initial_robot_right_rotation_matrix = np.array([[-1, 0, 0, 0.6], [0, 0, 1, -0.3], [0, 1, 0, -0.15], [0, 0, 0, 1]])
+
+    # initial_robot_left_pose_matrix = quaternion_to_transformation_matrix(robot_left_pose_init[3:],
+    #                                                                      robot_left_pose_init[:3])
+    # initial_robot_right_pose_matrix = quaternion_to_transformation_matrix(robot_right_pose_init[3:],
+    #                                                                       robot_right_pose_init[:3])
 
     draw_skeleton_and_robot(global_positions, skeleton_parent_indices, robot_left_pose_init, robot_right_pose_init,
                             object_pose_init, q_r, q_l)
@@ -692,21 +705,26 @@ if __name__ == '__main__':
     print("Updated Pose:\n", object_updated_pose_matrix)
 
     updated_robot_left_position = update_additional_points(object_pose_init, object_updated_pose_matrix,
-                                                           robot_left_pose_init[:3], object_updated_rotation)
+                                                           robot_left_pose_matrix_init[:3, 3], object_updated_rotation)
     updated_robot_right_position = update_additional_points(object_pose_init, object_updated_pose_matrix,
-                                                            robot_right_pose_init[:3], object_updated_rotation)
+                                                            robot_right_pose_matrix_init[:3, 3], object_updated_rotation)
 
     updated_robot_left_rotation = (
-            object_updated_rotation * R.from_matrix(initial_robot_left_pose_matrix[:3, :3])).as_quat()
+            object_updated_rotation * R.from_matrix(robot_left_pose_matrix_init[:3, :3])).as_quat()
     updated_robot_right_rotation = (
-            object_updated_rotation * R.from_matrix(initial_robot_right_pose_matrix[:3, :3])).as_quat()
+            object_updated_rotation * R.from_matrix(robot_right_pose_matrix_init[:3, :3])).as_quat()
 
     updated_robot_left_pose = np.append(updated_robot_left_position, updated_robot_left_rotation)
     updated_robot_right_pose = np.append(updated_robot_right_position, updated_robot_right_rotation)
+    # print("left_qua", updated_robot_left_pose)
 
-    updated_robot_left_pose_matrix = quaternion_to_transformation_matrix(updated_robot_left_position, updated_robot_left_rotation)
-    updated_robot_right_pose_matrix = quaternion_to_transformation_matrix(updated_robot_right_position, updated_robot_right_rotation)
+    updated_robot_left_pose_matrix = quaternion_to_transformation_matrix(updated_robot_left_rotation, updated_robot_left_position)
+    updated_robot_right_pose_matrix = quaternion_to_transformation_matrix(updated_robot_right_rotation, updated_robot_right_position)
 
+    print("initial_robot_left_pose", robot_left_pose_matrix_init)
+    print("initial_robot_right_pose", robot_right_pose_matrix_init)
+    print("updated_robot_left_pose", updated_robot_left_pose_matrix)
+    print("updated_robot_right_pose", updated_robot_right_pose_matrix)
     # print(updated_robot_left_pose)
     # print(global_positions[8])
     # print(global_positions[5])
