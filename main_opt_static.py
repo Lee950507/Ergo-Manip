@@ -1,11 +1,14 @@
 # This is a Python script for bi-manual human-robot collaborative box carrying.
 import numpy as np
 import math
+
+from nbclient.client import timestamp
 from scipy.optimize import minimize
 import transformation as tsf
 import utils
 import matplotlib.pyplot as plt
 from scipy.spatial.transform import Rotation as R
+from datetime import datetime
 
 
 last_relative_pose_wrists = None
@@ -193,6 +196,20 @@ def relative_pose_constraint(x):
     return updated_relative_hand - last_relative_displacement_wrists
 
 
+def z_axes_constraint(x):
+    # Compute hand positions
+    elbow_right, wrist_right = forward_kinematics(x[:4], d_uar, d_lar)
+    elbow_left, wrist_left = forward_kinematics(x[4:], d_ual, d_lal)
+
+    # Transformation
+    global_positions_wrist_right = global_positions[3] + [-wrist_right[1],-wrist_right[0], wrist_right[2]]
+    global_positions_wrist_left = global_positions[6] + [-wrist_left[1], wrist_left[0], wrist_left[2]]
+
+    # Compute relative pose between hands
+    relative_z_axes = euclidean_distance(global_positions_wrist_right[2], global_positions_wrist_left[2])
+    return relative_z_axes
+
+
 def manipulability_z_constraint(q, d_ua, d_la, arm='right'):
     # Compute the Jacobian matrix
     J = compute_jacobian(q, d_ua, d_la, arm)
@@ -237,20 +254,20 @@ def objective_function(x):
     reba_score = max(overall_arm_score_left, overall_arm_score_right)
 
     reba_threshold = 1.7  # Define the ergonomic threshold
-    penalty_reba = 200 * reba_score ** 2
+    penalty_reba = 300 * reba_score ** 2
 
     manip_right = manipulability_z_constraint(x[:4], d_uar, d_lar, arm='right')
     manip_left = manipulability_z_constraint(x[4:], d_ual, d_lal, arm='left')
-    manip_threshold = 2.5
+    manip_threshold = 10
 
     # if reba_score <= reba_threshold and manip_right >= manip_threshold and manip_left >= manip_threshold:
     #     print("Conditions met for early stopping.")
     #     return 0
 
-    penalty_manip_l = 10 * 1 / math.log(manip_left)
-    penalty_manip_r = 10 * 1 / math.log(manip_right)
+    penalty_manip_l = 10 * (manip_left - manip_threshold) ** 2
+    penalty_manip_r = 10 * (manip_right - manip_threshold) ** 2
 
-    regularization_2 = 0.05 * np.sum(np.square(x - initial_guess))
+    regularization_2 = 1 * np.sum(np.square(x[:4] - x[4:]))
 
     # Total cost: REBA score + penalty + regularization
     total_cost = penalty_reba + regularization_2 + penalty_manip_r + penalty_manip_l
@@ -270,7 +287,8 @@ def optimized_joints(q):
     # Initial_guess, constraints and bounds
     initial_guess = q
     constraints = [
-        {'type': 'eq', 'fun': relative_pose_constraint}  # Fixed relative pose
+        {'type': 'eq', 'fun': relative_pose_constraint},  # Fixed relative pose
+        # {'type': 'eq', 'fun': z_axes_constraint}
     ]
     bounds = [
         (-math.pi / 18, 17 * math.pi / 18),
@@ -329,24 +347,6 @@ def multi_callback(shouL_position_init, shouR_position_init, elbowL_position_ini
     relative_displacement_wrists = euclidean_distance(wristL_position_init[:3], wristR_position_init[:3])
     print("relative_pose_hand:", relative_displacement_wrists)
 
-
-    # Body dimensions
-    d_ual, d_uar, d_lal, d_lar = calculate_arm_dimensions(shouL_position_init, elbowL_position_init, wristL_position_init, shouR_position_init, elbowR_position_init, wristR_position_init)
-
-    # Transform from robot frame to each shoulder frame
-    p_elbowL_init = elbowL_position_init - shouL_position_init
-    p_elbowL_init = np.array([p_elbowL_init[1], -p_elbowL_init[0], p_elbowL_init[2]])
-    p_wristL_init = wristL_position_init - shouL_position_init
-    p_wristL_init = np.array([p_wristL_init[1], -p_wristL_init[0], p_wristL_init[2]])
-
-    p_elbowR_init = elbowR_position_init - shouR_position_init
-    p_elbowR_init = np.array([-p_elbowR_init[1], -p_elbowR_init[0], p_elbowR_init[2]])
-    p_wristR_init = wristR_position_init - shouR_position_init
-    p_wristR_init = np.array([-p_wristR_init[1], -p_wristR_init[0], p_wristR_init[2]])
-
-    # Inverse kinematics for joint angles
-    q_l = inverse_kinematics(p_elbowL_init, p_wristL_init, d_ual, d_lal)
-    q_r = inverse_kinematics(p_elbowR_init, p_wristR_init, d_uar, d_lar)
     initial_guess = np.concatenate((q_r, q_l))
 
     # Force Manipulability ellipsoid
@@ -443,24 +443,38 @@ def update_additional_points(initial_pose, updated_pose, robot_point, rotation):
     return updated_point
 
 
-def draw_skeleton_and_robot(global_positions, skeleton_parent_indices, robot_left_pose, robot_right_pose, object_pose):
+def draw_skeleton_and_robot(global_positions, skeleton_parent_indices, robot_left_pose, robot_right_pose, object_pose, q_r, q_l):
     fig = plt.figure()
     ax = fig.add_subplot(111, projection='3d')
 
-    utils.plot_skeleton(ax, global_positions, skeleton_parent_indices, color='blue')
+    # Set background color to white
+    fig.patch.set_alpha(0)
+    ax.w_xaxis.pane.fill = False
+    ax.w_yaxis.pane.fill = False
+    ax.w_zaxis.pane.fill = False
 
-    # Draw robot left end-effector pose
-    ax.scatter(robot_left_pose[0], robot_left_pose[1], robot_left_pose[2], color='red', label='Cobot Left EE')
-    left_rotation_matrix = quaternion_to_rotation_matrix(robot_left_pose[3:7])
-    draw_orientation(ax, robot_left_pose[:3], left_rotation_matrix, scale=0.2)
+    # Remove grid
+    ax.grid(False)  # Turn off the grid
 
-    # Draw robot right end-effector pose
-    ax.scatter(robot_right_pose[0], robot_right_pose[1], robot_right_pose[2], color='green', label='Cobot Right EE')
-    right_rotation_matrix = quaternion_to_rotation_matrix(robot_right_pose[3:7])
-    draw_orientation(ax, robot_right_pose[:3], right_rotation_matrix, scale=0.2)
+    utils.plot_skeleton(ax, global_positions, skeleton_parent_indices, color='black')
 
-    ax.scatter(object_pose[0, 3], object_pose[1, 3], object_pose[2, 3], color='blue', label='Object')
-    draw_orientation(ax, object_pose[:3, 3], object_pose[:3, :3], scale=0.2)
+    eigenvalues_right, eigenvectors_right = compute_force_ellipsoid(q_r, d_uar, d_lar, arm='right')
+    utils.plot_ellipsoid(ax, eigenvalues_right, eigenvectors_right, global_positions[5], 'b')
+    eigenvalues_left, eigenvectors_left = compute_force_ellipsoid(q_l, d_ual, d_lal, arm='left')
+    utils.plot_ellipsoid(ax, eigenvalues_left, eigenvectors_left, global_positions[8], 'r')
+
+    # # Draw robot left end-effector pose
+    # ax.scatter(robot_left_pose[0], robot_left_pose[1], robot_left_pose[2], color='red', label='Cobot Left EE')
+    # left_rotation_matrix = quaternion_to_rotation_matrix(robot_left_pose[3:7])
+    # draw_orientation(ax, robot_left_pose[:3], left_rotation_matrix, scale=0.2)
+    #
+    # # Draw robot right end-effector pose
+    # ax.scatter(robot_right_pose[0], robot_right_pose[1], robot_right_pose[2], color='green', label='Cobot Right EE')
+    # right_rotation_matrix = quaternion_to_rotation_matrix(robot_right_pose[3:7])
+    # draw_orientation(ax, robot_right_pose[:3], right_rotation_matrix, scale=0.2)
+    #
+    # ax.scatter(object_pose[0, 3], object_pose[1, 3], object_pose[2, 3], color='blue', label='Object')
+    # draw_orientation(ax, object_pose[:3, 3], object_pose[:3, :3], scale=0.2)
 
     # Set labels and title
     ax.set_xticks([0.5, 1.0, 1.5, 2.0, 2.5])
@@ -475,6 +489,11 @@ def draw_skeleton_and_robot(global_positions, skeleton_parent_indices, robot_lef
     # Set font size for tick labels on each axis
     ax.tick_params(axis='both', which='major', labelsize=16)  # Major ticks
     ax.tick_params(axis='both', which='minor', labelsize=12)  # Minor ticks (if any)
+
+    ax.view_init(elev=0, azim=-135)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    plt.savefig(f'/home/ubuntu/Ergo-Manip/data/fig/{timestamp}.png', dpi=300, bbox_inches='tight', transparent=True)
 
 
 def draw_orientation(ax, position, rotation_matrix, scale=0.3):
@@ -518,7 +537,7 @@ if __name__ == '__main__':
 
     # Skeleton Model
     skeleton_joint_name, skeleton_joint, skeleton_parent_indices, skeleton_joint_local_translation = utils.read_skeleton_motion(
-        '/home/curi/Chenzui/Ergo-Manip/data/demo_2_test_chenzui_only_optitrack2hotu.npy')
+        '/home/ubuntu/Rofunc/examples/data/hotu2/20250103/demo_3_optitrack2hotu.npy')
     skeleton_joint = skeleton_joint[300, :]
     global_positions, global_rotations = utils.forward_kinematics(skeleton_joint_local_translation,
                                                                   skeleton_joint, skeleton_parent_indices)
@@ -530,6 +549,25 @@ if __name__ == '__main__':
     # global_positions[5] = global_positions[3] + (wristR_position_init - shouR_position_init)
     # global_positions[8] = global_positions[6] + (wristL_position_init - shouL_position_init)
 
+    # Body dimensions
+    d_ual, d_uar, d_lal, d_lar = calculate_arm_dimensions(global_positions[6], global_positions[7],
+                                                          global_positions[8], global_positions[3],
+                                                          global_positions[4], global_positions[5])
+
+    # Transform from robot frame to each shoulder frame
+    p_elbowL_init = global_positions[7] - global_positions[6]
+    p_elbowL_init = np.array([p_elbowL_init[1], -p_elbowL_init[0], p_elbowL_init[2]])
+    p_wristL_init = global_positions[8] - global_positions[6]
+    p_wristL_init = np.array([p_wristL_init[1], -p_wristL_init[0], p_wristL_init[2]])
+
+    p_elbowR_init = global_positions[4] - global_positions[3]
+    p_elbowR_init = np.array([-p_elbowR_init[1], -p_elbowR_init[0], p_elbowR_init[2]])
+    p_wristR_init = global_positions[5] - global_positions[3]
+    p_wristR_init = np.array([-p_wristR_init[1], -p_wristR_init[0], p_wristR_init[2]])
+
+    # Inverse kinematics for joint angles
+    q_l = inverse_kinematics(p_elbowL_init, p_wristL_init, d_ual, d_lal)
+    q_r = inverse_kinematics(p_elbowR_init, p_wristR_init, d_uar, d_lar)
 
     shou_center = ( shouL_position_init + shouR_position_init ) / 2
     global_positions = global_positions + np.array([shou_center[0], shou_center[1], 0])
@@ -545,7 +583,7 @@ if __name__ == '__main__':
     initial_robot_left_pose_matrix = quaternion_to_transformation_matrix(robot_left_pose_init[3:], robot_left_pose_init[:3])
     initial_robot_right_pose_matrix = quaternion_to_transformation_matrix(robot_right_pose_init[3:], robot_right_pose_init[:3])
 
-    draw_skeleton_and_robot(global_positions, skeleton_parent_indices, robot_left_pose_init, robot_right_pose_init, object_pose_init)
+    draw_skeleton_and_robot(global_positions, skeleton_parent_indices, robot_left_pose_init, robot_right_pose_init, object_pose_init, q_r, q_l)
 
     # Optimization
     optimized_angles = multi_callback(global_positions[6], global_positions[3], global_positions[7], global_positions[4], global_positions[8], global_positions[5])
@@ -568,11 +606,9 @@ if __name__ == '__main__':
 
     updated_robot_left_pose = np.append(updated_robot_left_position, updated_robot_left_rotation)
     updated_robot_right_pose = np.append(updated_robot_right_position, updated_robot_right_rotation)
-    print(updated_robot_left_pose)
-    print(global_positions[8])
-    print(global_positions[5])
+    print(updated_robot_left_pose, updated_robot_right_pose)
 
-    draw_skeleton_and_robot(global_positions, skeleton_parent_indices, updated_robot_left_pose, updated_robot_right_pose, object_updated_pose_matrix)
+    draw_skeleton_and_robot(global_positions, skeleton_parent_indices, updated_robot_left_pose, updated_robot_right_pose, object_updated_pose_matrix, optimized_angles[:4], optimized_angles[4:])
 
     # Show the plot
     plt.show()

@@ -41,7 +41,7 @@ def plot_ellipsoid(ax, eigenvalues, eigenvectors, center, color):
             x[i, j] += center[0]
             y[i, j] += center[1]
             z[i, j] += center[2]
-    ax.plot_surface(x, y, z, color=color, alpha=0.3)
+    ax.plot_surface(x, y, z, color=color, alpha=0.8)
 
 def ua_get_color(score):
     if 1 <= score <= 2:
