@@ -456,7 +456,7 @@ def draw_skeleton_and_robot(global_positions, skeleton_parent_indices, robot_lef
     # Remove grid
     ax.grid(False)  # Turn off the grid
 
-    utils.plot_skeleton(ax, global_positions, skeleton_parent_indices, color='white')
+    utils.plot_skeleton(ax, global_positions, skeleton_parent_indices, color='black')
 
     eigenvalues_right, eigenvectors_right = compute_force_ellipsoid(q_r, d_uar, d_lar, arm='right')
     utils.plot_ellipsoid(ax, eigenvalues_right, eigenvectors_right, global_positions[5], 'b')

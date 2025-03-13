@@ -457,7 +457,7 @@ def draw_skeleton_and_robot(global_positions, skeleton_parent_indices, robot_lef
     # Remove grid
     ax.grid(False)  # Turn off the grid
 
-    utils.plot_skeleton(ax, global_positions, skeleton_parent_indices, color='white')
+    utils.plot_skeleton(ax, global_positions, skeleton_parent_indices, color='black')
 
     eigenvalues_right, eigenvectors_right = compute_force_ellipsoid(q_r, d_uar, d_lar, arm='right')
     utils.plot_ellipsoid(ax, eigenvalues_right, eigenvectors_right, global_positions[5], 'b')
@@ -548,7 +548,7 @@ def multi_callback(sub_robot, sub_object, sub_shouL, sub_elbowL, sub_wristL, sub
     global_positions = global_positions + np.array([shou_center[0], shou_center[1], 0])
     initial_wrist_position = np.array([global_positions[5],
                                        global_positions[8]])
-    print("init", initial_wrist_position)
+    # print("init", initial_wrist_position)
 
     # 监测新的手腕位置
     wristL_position_current = T_optitrack2robotbase[:3, :3] @ sub_wristL[:3] + T_optitrack2robotbase[:3, 3]
@@ -563,6 +563,9 @@ def multi_callback(sub_robot, sub_object, sub_shouL, sub_elbowL, sub_wristL, sub
         optimized_angles = postural_optimization(global_positions[8], global_positions[5], q_l, q_r)
         last_relative_distance = current_relative_distance  # 更新上次相对距离
 
+        draw_skeleton_and_robot(global_positions, skeleton_parent_indices, None, None,
+                                None, q_r, q_l)
+
 
     time.sleep(0.5)  # 每0.5秒监测一次
 
@@ -571,7 +574,7 @@ if __name__ == '__main__':
 
     # Skeleton Model
     skeleton_joint_name, skeleton_joint, skeleton_parent_indices, skeleton_joint_local_translation = utils.read_skeleton_motion(
-        '/home/ubuntu/Rofunc/examples/data/hotu2/20250103/demo_3_optitrack2hotu.npy')
+        '/home/ubuntu/Rofunc/examples/data/hotu2/20250103/demo_1_optitrack2hotu.npy')
     skeleton_joint = skeleton_joint[300, :]
     global_positions, global_rotations = utils.forward_kinematics(skeleton_joint_local_translation,
                                                                   skeleton_joint, skeleton_parent_indices)
