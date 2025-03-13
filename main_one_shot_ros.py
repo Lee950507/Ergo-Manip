@@ -408,11 +408,11 @@ def optimized_joints():
     return optimized_angles
 
 
-def optimizing_joint_angles(shouL_position_init, shouR_position_init, elbowL_position_init, elbowR_position_init, wristL_position_init, wristR_position_init):
+def  optimizing_joint_angles(global_positions):
     global last_relative_displacement_wrists, last_object_pose
 
     # Relative displacement of contact points
-    relative_displacement_wrists = euclidean_distance(wristL_position_init[:3], wristR_position_init[:3])
+    relative_displacement_wrists = euclidean_distance(global_positions[5], global_positions[8])
     print("relative_pose_hand:", relative_displacement_wrists)
 
     last_relative_displacement_wrists = relative_displacement_wrists
@@ -573,34 +573,34 @@ def draw_orientation(ax, position, rotation_matrix, scale=0.3):
 
 if __name__ == '__main__':
     # rospy.init_node('emo_hrc')
-    # subscriber_robot = rospy.wait_for_message('/vrpn_client_node/robot/pose', PoseStamped)
-    # subscriber_object = rospy.wait_for_message('/vrpn_client_node/object/pose', PoseStamped)
-    # subscriber_shouL = rospy.wait_for_message ('/vrpn_client_node/shouL/pose', PoseStamped)
-    # subscriber_shouR = rospy.wait_for_message('/vrpn_client_node/shouR/pose', PoseStamped)
-    # subscriber_elbowL = rospy.wait_for_message('/vrpn_client_node/elbowL/pose', PoseStamped)
-    # subscriber_elbowR = rospy.wait_for_message('/vrpn_client_node/elbowR/pose', PoseStamped)
-    # subscriber_wristL = rospy.wait_for_message('/vrpn_client_node/wristL/pose', PoseStamped)
-    # subscriber_wristR = rospy.wait_for_message('/vrpn_client_node/wristR/pose', PoseStamped)
-    #
-    # sub_robot = transform_to_pose(subscriber_robot)
-    # sub_object = transform_to_pose(subscriber_object)
-    #
-    # sub_shouL = transform_to_pose(subscriber_shouL)
-    # sub_shouR = transform_to_pose(subscriber_shouR)
-    # sub_elbowL = transform_to_pose(subscriber_elbowL)
-    # sub_elbowR = transform_to_pose(subscriber_elbowR)
-    # sub_wristL = transform_to_pose(subscriber_wristL)
-    # sub_wristR = transform_to_pose(subscriber_wristR)
+    subscriber_robot = rospy.wait_for_message('/vrpn_client_node/robot/pose', PoseStamped)
+    subscriber_object = rospy.wait_for_message('/vrpn_client_node/object/pose', PoseStamped)
+    subscriber_shouL = rospy.wait_for_message ('/vrpn_client_node/shouL/pose', PoseStamped)
+    subscriber_shouR = rospy.wait_for_message('/vrpn_client_node/shouR/pose', PoseStamped)
+    subscriber_elbowL = rospy.wait_for_message('/vrpn_client_node/elbowL/pose', PoseStamped)
+    subscriber_elbowR = rospy.wait_for_message('/vrpn_client_node/elbowR/pose', PoseStamped)
+    subscriber_wristL = rospy.wait_for_message('/vrpn_client_node/wristL/pose', PoseStamped)
+    subscriber_wristR = rospy.wait_for_message('/vrpn_client_node/wristR/pose', PoseStamped)
 
-    sub_robot = np.array([-0.2195, 1.11462, 0, 0, 0, 0, 1])
-    sub_object = np.array([1.3, 1.3, 0, 0, 0, 0, 1])
+    sub_robot = transform_to_pose(subscriber_robot)
+    sub_object = transform_to_pose(subscriber_object)
 
-    sub_shouL = np.array([2, 1.5, 0.25, 0, 0, 0, 1])
-    sub_shouR = np.array([2, 1.5, -0.25, 0, 0, 0, 1])
-    sub_elbowL = np.array([1.9, 1.3, 0.3, 0, 0, 0, 1])
-    sub_elbowR = np.array([1.9, 1.3, -0.3, 0, 0, 0, 1])
-    sub_wristL = np.array([1.8, 1.2, 0.3, 0, 0, 0, 1])
-    sub_wristR = np.array([1.8, 1.4, -0.3, 0, 0, 0, 1])
+    sub_shouL = transform_to_pose(subscriber_shouL)
+    sub_shouR = transform_to_pose(subscriber_shouR)
+    sub_elbowL = transform_to_pose(subscriber_elbowL)
+    sub_elbowR = transform_to_pose(subscriber_elbowR)
+    sub_wristL = transform_to_pose(subscriber_wristL)
+    sub_wristR = transform_to_pose(subscriber_wristR)
+
+    # sub_robot = np.array([-0.2195, 1.11462, 0, 0, 0, 0, 1])
+    # sub_object = np.array([1.3, 1.3, 0, 0, 0, 0, 1])
+    #
+    # sub_shouL = np.array([2, 1.5, 0.25, 0, 0, 0, 1])
+    # sub_shouR = np.array([2, 1.5, -0.25, 0, 0, 0, 1])
+    # sub_elbowL = np.array([1.9, 1.3, 0.3, 0, 0, 0, 1])
+    # sub_elbowR = np.array([1.9, 1.3, -0.3, 0, 0, 0, 1])
+    # sub_wristL = np.array([1.8, 1.2, 0.3, 0, 0, 0, 1])
+    # sub_wristR = np.array([1.8, 1.4, -0.3, 0, 0, 0, 1])
 
     # Transform from optitrack frame to robot frame
     T_optitrack2robotbase = np.linalg.inv(
@@ -645,13 +645,15 @@ if __name__ == '__main__':
 
     # Skeleton Model
     skeleton_joint_name, skeleton_joint, skeleton_parent_indices, skeleton_joint_local_translation = utils.read_skeleton_motion(
-        '/home/curi/Chenzui/Ergo-Manip-main/data/demo_data/demo_2_test_chenzui_only_optitrack2hotu.npy')
+        '/home/curi/Chenzui/Ergo-Manip-main/data/demo_data/demo_2_test_andrew_only_optitrack2hotu.npy')
     skeleton_joint = skeleton_joint[450, :]
     global_positions, global_rotations = utils.forward_kinematics(skeleton_joint_local_translation,
                                                                   skeleton_joint, skeleton_parent_indices)
     global_positions[:, 2] = global_positions[:, 2] * 1.2  # Body Dimension Scaling
 
     # Transformation
+    # global_positions[3] = np.array([0, - (shouR_position_init[1] - shouL_position_init[1]) / 2, shouR_position_init[2]])
+    # global_positions[3] = np.array([0, - (shouR_position_init[1] - shouL_position_init[1]) / 2, shouR_position_init[2]])
     global_positions[4] = global_positions[3] + (elbowR_position_init - shouR_position_init)
     global_positions[7] = global_positions[6] + (elbowL_position_init - shouL_position_init)
     global_positions[5] = global_positions[3] + (wristR_position_init - shouR_position_init)
@@ -692,8 +694,7 @@ if __name__ == '__main__':
     # Optimization
     # optimized_angles = optimizing_joint_angles(global_positions[6], global_positions[3], global_positions[7],
     #                                            global_positions[4], global_positions[8], global_positions[5])
-    optimized_angles = optimizing_joint_angles(shouL_position_init, shouR_position_init, elbowL_position_init,
-                                               elbowR_position_init, wristL_position_init, wristR_position_init)
+    optimized_angles = optimizing_joint_angles(global_positions)
 
     updated_wrist_position = np.array([global_positions[5],
                                        global_positions[8]])
