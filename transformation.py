@@ -146,16 +146,25 @@ def generate_pose_under_robot_base(opti_robot, opti_box):
 
 
 if __name__ == '__main__':
-    ori_arm_base = np.array([0.75116071, -0.52792446, 0.0067883143, -0.396241422])
+    T_MobileBaseToTorsoBase = np.array([[1, 0, 0, 0.2375], [0, 1, 0, 0], [0, 0, 1, 0.53762], [0, 0, 0, 1]])
+    torso_state = np.array([0, -0.853187084197998, 0.5779626369476318])
+    p, R = transform_torso_base_to_torso_end(torso_state)
+    T_TorsoBaseToTorsoEnd = np.r_[np.c_[R, p.T], np.array([[0, 0, 0, 1]])]
 
-    T_MobileBaseToLeftArmBase, T_MobileBaseToRightArmBase = transform_robot_base_to_arm_base(np.array([-0.0248294342, -0.7418483, 0.5442205]))
-        
-    T = T_MobileBaseToRightArmBase
-    # T = np.linalg.inv(T_MobileBaseToRightArmBase)
+    T_MobileBaseToTorsoEnd = T_MobileBaseToTorsoBase @ T_TorsoBaseToTorsoEnd
+    print(T_MobileBaseToTorsoEnd)
 
-    right_rotation_temp = R.from_quat(ori_arm_base)
-    right_pose_orientation_matrix = right_rotation_temp.as_matrix()
-    right_orientation_matrix_new = T[:3, :3] @ right_pose_orientation_matrix
-    right_qua_temp = R.from_matrix(right_orientation_matrix_new)
-    right_orientation_robot_base = right_qua_temp.as_quat()
-    print(right_orientation_robot_base)
+
+    # ori_arm_base = np.array([0.75116071, -0.52792446, 0.0067883143, -0.396241422])
+    #
+    # T_MobileBaseToLeftArmBase, T_MobileBaseToRightArmBase = transform_robot_base_to_arm_base(np.array([-0.0248294342, -0.7418483, 0.5442205]))
+    #
+    # T = T_MobileBaseToRightArmBase
+    # # T = np.linalg.inv(T_MobileBaseToRightArmBase)
+    #
+    # right_rotation_temp = R.from_quat(ori_arm_base)
+    # right_pose_orientation_matrix = right_rotation_temp.as_matrix()
+    # right_orientation_matrix_new = T[:3, :3] @ right_pose_orientation_matrix
+    # right_qua_temp = R.from_matrix(right_orientation_matrix_new)
+    # right_orientation_robot_base = right_qua_temp.as_quat()
+    # print(right_orientation_robot_base)
