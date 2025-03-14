@@ -598,7 +598,8 @@ def multi_callback(subscriber_shouL, subscriber_shouR, subscriber_elbowL, subscr
         stable_count += 1  # 计数增加
         print("count number:", stable_count)
         last_relative_distance = current_relative_distance  # 更新上次相对距离
-    else:
+    elif abs(current_relative_distance - last_relative_distance) > stability_threshold and index == 1:
+        print("count restart...")
         stable_count = 0  # 重置计数
         last_relative_distance = current_relative_distance  # 更新上次相对距离
 
@@ -617,7 +618,6 @@ def multi_callback(subscriber_shouL, subscriber_shouR, subscriber_elbowL, subscr
 
 
 if __name__ == '__main__':
-
     # Skeleton Model
     skeleton_joint_name, skeleton_joint, skeleton_parent_indices, skeleton_joint_local_translation = utils.read_skeleton_motion(
         '/home/curi/Chenzui/Ergo-Manip/data/demo_2_test_chenzui_only_optitrack2hotu.npy')

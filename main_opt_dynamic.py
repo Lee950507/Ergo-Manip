@@ -507,6 +507,7 @@ def draw_orientation(ax, position, rotation_matrix, scale=0.3):
 
 def multi_callback(sub_robot, sub_object, sub_shouL, sub_elbowL, sub_wristL, sub_shouR, sub_elbowR, sub_wristR):
     global global_positions, last_relative_distance
+    global index, stable_count
 
     # Transform from optitrack frame to robot frame
     T_optitrack2robotbase = np.linalg.inv(
@@ -554,10 +555,31 @@ def multi_callback(sub_robot, sub_object, sub_shouL, sub_elbowL, sub_wristL, sub
     wristL_position_current = T_optitrack2robotbase[:3, :3] @ sub_wristL[:3] + T_optitrack2robotbase[:3, 3]
     wristR_position_current = T_optitrack2robotbase[:3, :3] @ sub_wristR[:3] + T_optitrack2robotbase[:3, 3]
 
-    current_relative_distance = np.linalg.norm(wristL_position_current - wristR_position_current)
+    current_relative_distance = np.linalg.norm(global_positions[5] - global_positions[8])
 
+    # 稳定性判断变量
+    N = 5  # 设定的稳定判断次数
+    stability_threshold = 0.03  # 稳定性变化阈值
+    change_threshold = 0.02  # 相对距离变化阈值
+    print(index)
     # 判断是否需要优化
-    if abs(current_relative_distance - last_relative_distance) > 0.1:  # 这里的0.1可以根据需要调整
+    if abs(current_relative_distance - last_relative_distance) > change_threshold and index == 0:  # 判断相对距离变化
+        print("相对距离变化超过阈值，开始判断稳定性")
+        last_relative_distance = current_relative_distance  # 更新上次相对距离
+        stable_count = 0  # 距离变化，重置稳定计数
+        index = 1
+
+    # 检查相对距离是否稳定
+    if abs(current_relative_distance - last_relative_distance) <= stability_threshold and index == 1:
+        stable_count += 1  # 计数增加
+        print("count number:", stable_count)
+        last_relative_distance = current_relative_distance  # 更新上次相对距离
+    elif abs(current_relative_distance - last_relative_distance) > stability_threshold and index == 1:
+        print("count restart...")
+        stable_count = 0  # 重置计数
+        last_relative_distance = current_relative_distance  # 更新上次相对距离
+
+    if stable_count > N:
         print("optimizing...")
         # 进行优化
         optimized_angles = postural_optimization(global_positions[8], global_positions[5], q_l, q_r)
@@ -565,30 +587,36 @@ def multi_callback(sub_robot, sub_object, sub_shouL, sub_elbowL, sub_wristL, sub
 
         draw_skeleton_and_robot(global_positions, skeleton_parent_indices, None, None,
                                 None, q_r, q_l)
+        index = 0
+        stable_count = 0
 
+    print("current_relative_distance:", current_relative_distance)
+    print("last_relative_distance:", last_relative_distance)
 
     time.sleep(0.5)  # 每0.5秒监测一次
 
 
 if __name__ == '__main__':
-
-    # Skeleton Model
-    skeleton_joint_name, skeleton_joint, skeleton_parent_indices, skeleton_joint_local_translation = utils.read_skeleton_motion(
-        '/home/ubuntu/Rofunc/examples/data/hotu2/20250103/demo_1_optitrack2hotu.npy')
-    skeleton_joint = skeleton_joint[300, :]
-    global_positions, global_rotations = utils.forward_kinematics(skeleton_joint_local_translation,
-                                                                  skeleton_joint, skeleton_parent_indices)
-    global_positions[:, 2] = global_positions[:, 2] * 1.2 # Body Dimension Scaling
-
-    # Body dimensions
-    d_ual, d_uar, d_lal, d_lar = calculate_arm_dimensions(global_positions[6], global_positions[7],
-                                                          global_positions[8], global_positions[3],
-                                                          global_positions[4], global_positions[5])
-
     last_relative_distance = 0
+    index = 0
+    stable_count = 0
 
     # Postural Optimization
-    while True:
+    for i in range(10000):
+        # Skeleton Model
+        skeleton_joint_name, skeleton_joint, skeleton_parent_indices, skeleton_joint_local_translation = utils.read_skeleton_motion(
+            '/home/ubuntu/Rofunc/examples/data/hotu2/20250103/demo_1_optitrack2hotu.npy')
+
+        skeleton_joint = skeleton_joint[i, :]
+        global_positions, global_rotations = utils.forward_kinematics(skeleton_joint_local_translation,
+                                                                      skeleton_joint, skeleton_parent_indices)
+        global_positions[:, 2] = global_positions[:, 2] * 1.2  # Body Dimension Scaling
+
+        # Body dimensions
+        d_ual, d_uar, d_lal, d_lar = calculate_arm_dimensions(global_positions[6], global_positions[7],
+                                                              global_positions[8], global_positions[3],
+                                                              global_positions[4], global_positions[5])
+
         sub_robot = np.array([-0.2195, 1.11462, 0, 0, 0, 0, 1])
         sub_object = np.array([1.3, 1.3, 0, 0, 0, 0, 1])
 
