@@ -69,6 +69,64 @@ def trans_global2shoulder(shoulder, elbow, wrist, arm='left'):
     return elbow_new, wrist_new
 
 
+def minimum_jerk_trajectory(start, end, t_start, t_end, t_sample):
+    # 时间差
+    T = t_end - t_start
+
+    # Minimum jerk 的多项式系数
+    c0 = start[0]
+    c1 = start[1]
+    c2 = start[2] / 2.0
+    c3 = (20 * (end[0] - start[0]) - (8 * end[1] + 12 * start[1]) * T - (3 * start[2] - end[2]) * T**2) / (2 * T**3)
+    c4 = (-30 * (end[0] - start[0]) + (14 * end[1] + 16 * start[1]) * T + (3 * start[2] - 2 * end[2]) * T**2) / (2 * T**4)
+    c5 = (12 * (end[0] - start[0]) - (6 * end[1] + 6 * start[1]) * T - (start[2] - end[2]) * T**2) / (2 * T**5)
+
+    # 时间序列
+    time_steps = np.arange(t_start, t_end, t_sample)
+    trajectory = []
+    for t in time_steps:
+        dt = t - t_start
+        # 位置
+        position = c0 + c1 * dt + c2 * dt**2 + c3 * dt**3 + c4 * dt**4 + c5 * dt**5
+        # 速度
+        velocity = c1 + 2 * c2 * dt + 3 * c3 * dt**2 + 4 * c4 * dt**3 + 5 * c5 * dt**4
+        # 加速度
+        acceleration = 2 * c2 + 6 * c3 * dt + 12 * c4 * dt**2 + 20 * c5 * dt**3
+        trajectory.append([position, velocity, acceleration])
+
+    return np.array(trajectory)
+
+
+def generate_trajectory_with_speed_limit(waypoints, speed_limit, t_total, t_sample):
+    num_waypoints = len(waypoints)
+    if num_waypoints < 2:
+        raise ValueError("需要至少两个 waypoints 来生成轨迹")
+
+    # 平均分配时间
+    t_waypoints = np.linspace(0, t_total, num_waypoints)
+
+    # 存储最终轨迹
+    full_trajectory = []
+
+    for i in range(num_waypoints - 1):
+        start = [waypoints[i], 0, 0]  # 假设初始速度和加速度为 0
+        end = [waypoints[i + 1], 0, 0]  # 假设目标速度和加速度为 0
+        t_start = t_waypoints[i]
+        t_end = t_waypoints[i + 1]
+
+        # 生成 minimum jerk 轨迹
+        segment_trajectory = minimum_jerk_trajectory(start, end, t_start, t_end, t_sample)
+
+        # 合并轨迹段
+        if i > 0:
+            # 避免重复第一个点
+            full_trajectory = np.vstack((full_trajectory, segment_trajectory[1:]))
+        else:
+            full_trajectory = segment_trajectory
+
+    return full_trajectory
+
+
 def main():
     # subscriber_robot = rospy.wait_for_message('/vrpn_client_node/robot/pose', PoseStamped)
     # subscriber_shouL = rospy.wait_for_message('/vrpn_client_node/shouL/pose', PoseStamped)
@@ -89,10 +147,10 @@ def main():
     sub_robot = np.array([-0.2195, 1.11462, 0, 0, 0, 0, 1])
     sub_shouL = np.array([2, 1.5, 0.25, 0, 0, 0, 1])
     sub_shouR = np.array([2, 1.5, -0.25, 0, 0, 0, 1])
-    sub_elbowL = np.array([1.9, 1.3, 0.3, 0, 0, 0, 1])
-    sub_elbowR = np.array([1.9, 1.3, -0.3, 0, 0, 0, 1])
-    sub_wristL = np.array([1.8, 1.2, 0.3, 0, 0, 0, 1])
-    sub_wristR = np.array([1.8, 1.4, -0.3, 0, 0, 0, 1])
+    sub_elbowL = np.array([2, 1.25, 0.25, 0, 0, 0, 1])
+    sub_elbowR = np.array([1.9, 1.25, -0.25, 0, 0, 0, 1])
+    sub_wristL = np.array([2, 1.0, 0.25, 0, 0, 0, 1])
+    sub_wristR = np.array([2, 1.0, -0.25, 0, 0, 0, 1])
 
     T_optitrack2robotbase = np.linalg.inv(
         tsf.transform_optitrack_origin_to_optitrack_robot(
@@ -113,11 +171,11 @@ def main():
     optimal_q = [0, 0, 0, -math.pi / 6]
 
     skeleton_joint_name, skeleton_joints, skeleton_parent_indices, skeleton_joint_local_translation = \
-             utils.read_skeleton_motion('/home/ubuntu/Ergo-Manip/data/demo_2_test_chenzui_only_optitrack2hotu.npy')
+             utils.read_skeleton_motion('/home/curi/Chenzui/Ergo-Manip/data/demo_2_test_chenzui_only_optitrack2hotu.npy')
     skeleton_joint = skeleton_joints[500, :]
     global_positions, global_rotations = utils.forward_kinematics(skeleton_joint_local_translation,
                                                                   skeleton_joint, skeleton_parent_indices)
-    global_positions[:, 2] = global_positions[:, 2] * 1.2
+    # global_positions[:, 2] = global_positions[:, 2] * 1.2
     global_positions[4] = global_positions[3] + (elbowR_position_init - shouR_position_init)
     global_positions[7] = global_positions[6] + (elbowL_position_init - shouL_position_init)
     global_positions[5] = global_positions[3] + (wristR_position_init - shouR_position_init)
@@ -126,43 +184,43 @@ def main():
     shou_center = (shouL_position_init + shouR_position_init) / 2
     global_positions = global_positions + np.array([shou_center[0], shou_center[1], 0])
 
+    initial_position = global_positions[8]
+
     # Body dimensions
     d_ual, d_uar, d_lal, d_lar = mos.calculate_arm_dimensions(shouL_position_init, elbowL_position_init,
                                                           wristL_position_init, shouR_position_init,
                                                           elbowR_position_init, wristR_position_init)
 
     # 计算初始“最优”位置（仅用于可视化对比），这里采用 optimal_q 得到的手腕位置
-    _, optimal_position = mos.forward_kinematics(optimal_q, d_ual, d_lal)
-    optimal_position = trans_shoulder2global(optimal_position, global_positions[6], arm='left')
-    # optimal_position = trans_shoulder2global(optimal_position, global_positions[3], arm='right')
+    _, optimal_position = mos.forward_kinematics(optimal_q, d_uar, d_lar)
+    # optimal_position = trans_shoulder2global(optimal_position, global_positions[6], arm='left')
+    optimal_position = trans_shoulder2global(optimal_position, global_positions[3], arm='right')
 
-    p_elbowL_init, p_wristL_init = trans_global2shoulder(shouL_position_init, elbowL_position_init, wristL_position_init, arm='left')
-    # p_elbowR_init, p_wristR_init = trans_global2shoulder(global_positions[3], global_positions[4], global_positions[5],
-    #                                                      arm='right')
+    # p_elbowL_init, p_wristL_init = trans_global2shoulder(shouL_position_init, elbowL_position_init, wristL_position_init, arm='left')
+    p_elbowR_init, p_wristR_init = trans_global2shoulder(global_positions[3], global_positions[4], global_positions[5],
+                                                         arm='right')
 
-    current_q = mos.inverse_kinematics(p_elbowL_init, p_wristL_init, d_ual, d_lal)
+    current_q = mos.inverse_kinematics(p_elbowR_init, p_wristR_init, d_uar, d_lar)
     current_score = utils.calculate_upper_limb_score_with_joint_angles(current_q)
 
-    hand_current = global_positions[8]
-    elbow_current = global_positions[7]
-    # hand_current = global_positions[5]
-    # elbow_current = global_positions[4]
+    # shoulder = global_positions[6].copy()
+    shoulder = global_positions[3].copy()
 
-    shoulder = global_positions[6].copy()
-    # shoulder = global_positions[3].copy()
+    # ref_point = global_positions[8]
+    ref_point = global_positions[5]
 
     # 为动画记录历史轨迹（可选）
-    trajectory_hand = [hand_current.copy()]
-    trajectory_elbow = [elbow_current.copy()]
+    trajectory_hand = []
+    trajectory_elbow = []
 
     score_history = []
     joint_history = []
 
     # 设置候选离散采样数、压缩系数和迭代次数
-    num_samples_per_joint = 8
-    comp_factor = 0.1
-    num_iterations = 20
-    max_disp = 0.05  # maximum allowed displacement per iteration in global (hand) space
+    num_samples_per_joint = 15
+    comp_factor = 0.05
+    num_iterations = 30
+    max_disp = 0.03  # maximum allowed displacement per iteration in global (hand) space
 
     # 创建图形和三维坐标轴
     fig = plt.figure()
@@ -172,14 +230,11 @@ def main():
     def update(frame):
         nonlocal current_q, global_positions, trajectory_hand, trajectory_elbow
         ax.clear()
-        # ax.set_xlim((-0.5, 0.1))
-        # ax.set_ylim((-0.6, 0))
-        # ax.set_zlim((0.9, 1.5))
-        # ax.set_xlim((-0.5, 0.1))
-        # ax.set_ylim((0, 0.6))
-        # ax.set_zlim((0.9, 1.5))
+        ax.set_xlim((0.7, 2.2))
+        ax.set_ylim((-0.7, 0.8))
+        ax.set_zlim((0.0, 1.5))
 
-        ax.view_init(elev=30, azim=-30)
+        # ax.view_init(elev=30, azim=-30)
 
         # 以当前配置为中心，压缩关节角范围（仅对左侧手臂使用）
         new_bounds = compress_bounds(joint_angle_bounds, current_q, compression_factor=comp_factor)
@@ -192,9 +247,9 @@ def main():
         candidate_hands = []
 
         for q in q_combinations:
-            elbow_cand, hand_cand = mos.forward_kinematics(q, d_ual, d_lal)
-            hand_cand = trans_shoulder2global(hand_cand, shoulder, arm='left')
-            elbow_cand = trans_shoulder2global(elbow_cand, shoulder, arm='left')
+            elbow_cand, hand_cand = mos.forward_kinematics(q, d_uar, d_lar)
+            hand_cand = trans_shoulder2global(hand_cand, shoulder, arm='right')
+            elbow_cand = trans_shoulder2global(elbow_cand, shoulder, arm='right')
 
             candidate_elbows.append(elbow_cand)
             candidate_hands.append(hand_cand)
@@ -211,49 +266,46 @@ def main():
         # ax.scatter(candidate_hands[:, 0], candidate_hands[:, 1], candidate_hands[:, 2],
         #            c=colors, s=5, alpha=0.5)
 
-        ref_point = global_positions[8]
-        # ref_point = global_positions[5]
-
         ## Find the neighbor with the lowest ergo score
 
-        # target_idx = np.argmin(scores)
-        # candidate_q = q_combinations[target_idx]
-        #
-        # new_elbow = candidate_elbows[target_idx]
-        # new_hand = candidate_hands[target_idx]
-        #
-        # dist = np.linalg.norm(new_hand - ref_point)
-        # if dist > max_disp:
-        #     ratio = max_disp / dist
-        # else:
-        #     ratio = 1.0
-        #
-        # new_q = current_q + ratio * (candidate_q - current_q)
-
-        ## Find the neighbor pointing to the optimal point
-
-        A = ref_point
-        B = optimal_position
-        expected_p = A + frame * (B - A) / 20
-
-        candidate_expected_dists = np.linalg.norm(candidate_hands - expected_p, axis=1)
-        target_idx = np.argmin(candidate_expected_dists)
+        target_idx = np.argmin(scores)
         candidate_q = q_combinations[target_idx]
-        candidate_hand = candidate_hands[target_idx]
-        candidate_elbow = candidate_elbows[target_idx]
 
-        # 计算从当前手腕到选择候选点的位移
-        disp = candidate_hand - ref_point
-        dist = np.linalg.norm(disp)
+        new_elbow = candidate_elbows[target_idx]
+        new_hand = candidate_hands[target_idx]
+
+        dist = np.linalg.norm(new_hand - ref_point)
         if dist > max_disp:
             ratio = max_disp / dist
         else:
             ratio = 1.0
 
-        # 在关节空间中按比例线性插值更新配置
         new_q = current_q + ratio * (candidate_q - current_q)
 
-        new_elbow, new_hand = mos.forward_kinematics(new_q, d_ual, d_lal)
+        ## Find the neighbor pointing to the optimal point
+
+        # A = ref_point
+        # B = optimal_position
+        # expected_p = A + (frame + 1) * (B - A) / 20
+        #
+        # candidate_expected_dists = np.linalg.norm(candidate_hands - expected_p, axis=1)
+        # target_idx = np.argmin(candidate_expected_dists)
+        # candidate_q = q_combinations[target_idx]
+        # candidate_hand = candidate_hands[target_idx]
+        # candidate_elbow = candidate_elbows[target_idx]
+        #
+        # # 计算从当前手腕到选择候选点的位移
+        # disp = candidate_hand - ref_point
+        # dist = np.linalg.norm(disp)
+        # if dist > max_disp:
+        #     ratio = max_disp / dist
+        # else:
+        #     ratio = 1.0
+        #
+        # #在关节空间中按比例线性插值更新配置
+        # new_q = current_q + ratio * (candidate_q - current_q)
+
+        new_elbow, new_hand = mos.forward_kinematics(new_q, d_uar, d_lar)
         new_hand = trans_shoulder2global(new_hand, shoulder, arm='left')
         new_elbow = trans_shoulder2global(new_elbow, shoulder, arm='left')
 
@@ -262,10 +314,10 @@ def main():
         s = utils.calculate_upper_limb_score_with_joint_angles(current_q)
         score_history.append(s)
 
-        global_positions[7] = new_elbow
-        global_positions[8] = new_hand
-        # global_positions[4] = new_elbow
-        # global_positions[5] = new_hand
+        # global_positions[7] = new_elbow
+        # global_positions[8] = new_hand
+        global_positions[4] = new_elbow
+        global_positions[5] = new_hand
 
         # 将新位置加入轨迹（便于绘制轨迹）
         trajectory_hand.append(new_hand.copy())
@@ -280,7 +332,7 @@ def main():
 
         # 绘制轨迹（手腕轨迹）
         traj = np.array(trajectory_hand)
-        ax.plot(traj[:,0], traj[:,1], traj[:,2], c='green', linestyle='--')
+        ax.plot(traj[:,0], traj[:,1], traj[:,2], c='green', linestyle='-')
 
         # 绘制从肩部到手腕的连线，模拟手臂
         ax.plot([shoulder[0], new_elbow[0], new_hand[0]],
@@ -305,29 +357,25 @@ def main():
     # anim.save("/home/ubuntu/Ergo-Manip/vector_field/figs/animation_left_arm_straight.gif", writer=PillowWriter(fps=2))
     plt.show()
 
+    waypoints_ergo = trajectory_hand
+    waypoints_straight = [initial_position, optimal_position]
+
+    speed_limit = 0.05  # 最大速度限制
+    t_total = 5  # 总时间
+    t_sample = 0.001  # 采样时间间隔 (1000 Hz)
+
+    # 生成轨迹
+    trajectory_ergo = generate_trajectory_with_speed_limit(waypoints_ergo, speed_limit, t_total, t_sample)
+    trajectory_straight = generate_trajectory_with_speed_limit(waypoints_straight, speed_limit, t_total, t_sample)
+
     plt.figure()
-    iterations = np.arange(1, len(score_history) + 1)
-    plt.plot(iterations, score_history, marker='o', linestyle='-')
-    plt.xlabel("Iteration")
-    plt.ylabel("Score")
-    plt.title("Score over Iterations")
-    plt.grid(True)
-    # plt.savefig("/home/ubuntu/Ergo-Manip/vector_field/figs/score_variation_left_ergo_based.png")
+    plt.plot(trajectory_straight[:, 0])
+    # plt.plot(trajectory_straight[:, 1])
+    # plt.plot(trajectory_straight[:, 2])
     plt.show()
 
-    joint_history = np.array(joint_history)  # shape: (num_iterations, num_joints)
-    num_joints = joint_history.shape[1]
-    plt.figure()
-    for j in range(num_joints):
-        plt.plot(np.arange(1, joint_history.shape[0] + 1), joint_history[:, j],
-                 marker='o', linestyle='-', label=f"Joint {j + 1}")
-    plt.xlabel("Iteration")
-    plt.ylabel("Joint Angle (rad)")
-    plt.title("Joint Angles over Iterations")
-    plt.legend()
-    plt.grid(True)
-    # plt.savefig("/home/ubuntu/Ergo-Manip/vector_field/figs/joint_angles_plot.png")
-    plt.show()
 
 if __name__ == '__main__':
     main()
+
+

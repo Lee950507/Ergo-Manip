@@ -61,7 +61,7 @@ def main():
     optimal_q = [0, 0, 0, -math.pi / 6]
 
     skeleton_joint_name, skeleton_joints, skeleton_parent_indices, skeleton_joint_local_translation = \
-             utils.read_skeleton_motion('/home/ubuntu/Ergo-Manip/data/demo_2_test_chenzui_only_optitrack2hotu.npy')
+             utils.read_skeleton_motion('/home/curi/Chenzui/Ergo-Manip/data/demo_2_test_chenzui_only_optitrack2hotu.npy')
     skeleton_joint = skeleton_joints[400, :]
     global_positions, global_rotations = utils.forward_kinematics(skeleton_joint_local_translation,
                                                                   skeleton_joint, skeleton_parent_indices)
@@ -154,42 +154,42 @@ def main():
 
         ## Find the neighbor with the lowest ergo score
 
-        # target_idx = np.argmin(scores)
-        # candidate_q = q_combinations[target_idx]
-        #
-        # new_elbow = candidate_elbows[target_idx]
-        # new_hand = candidate_hands[target_idx]
-        #
-        # dist = np.linalg.norm(new_hand - ref_point)
-        # if dist > max_disp:
-        #     ratio = max_disp / dist
-        # else:
-        #     ratio = 1.0
-        #
-        # new_q = current_q + ratio * (candidate_q - current_q)
-
-        ## Find the neighbor pointing to the optimal point
-
-        A = ref_point
-        B = optimal_position
-        expected_p = A + frame * (B - A) / 20
-
-        candidate_expected_dists = np.linalg.norm(candidate_hands - expected_p, axis=1)
-        target_idx = np.argmin(candidate_expected_dists)
+        target_idx = np.argmin(scores)
         candidate_q = q_combinations[target_idx]
-        candidate_hand = candidate_hands[target_idx]
-        candidate_elbow = candidate_elbows[target_idx]
 
-        # 计算从当前手腕到选择候选点的位移
-        disp = candidate_hand - ref_point
-        dist = np.linalg.norm(disp)
+        new_elbow = candidate_elbows[target_idx]
+        new_hand = candidate_hands[target_idx]
+
+        dist = np.linalg.norm(new_hand - ref_point)
         if dist > max_disp:
             ratio = max_disp / dist
         else:
             ratio = 1.0
 
-        # 在关节空间中按比例线性插值更新配置
         new_q = current_q + ratio * (candidate_q - current_q)
+
+        ## Find the neighbor pointing to the optimal point
+
+        # A = ref_point
+        # B = optimal_position
+        # expected_p = A + frame * (B - A) / 20
+        #
+        # candidate_expected_dists = np.linalg.norm(candidate_hands - expected_p, axis=1)
+        # target_idx = np.argmin(candidate_expected_dists)
+        # candidate_q = q_combinations[target_idx]
+        # candidate_hand = candidate_hands[target_idx]
+        # candidate_elbow = candidate_elbows[target_idx]
+        #
+        # # 计算从当前手腕到选择候选点的位移
+        # disp = candidate_hand - ref_point
+        # dist = np.linalg.norm(disp)
+        # if dist > max_disp:
+        #     ratio = max_disp / dist
+        # else:
+        #     ratio = 1.0
+        #
+        # # 在关节空间中按比例线性插值更新配置
+        # new_q = current_q + ratio * (candidate_q - current_q)
 
         new_elbow, new_hand = mos.forward_kinematics(new_q, d_ual, d_lal)
         new_hand = trans_shoulder2global(new_hand, shoulder, arm='left')
