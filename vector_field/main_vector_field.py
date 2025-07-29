@@ -2,7 +2,7 @@ import numpy as np
 import math
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
-from matplotlib.animation import FuncAnimation
+from matplotlib.animation import FuncAnimation, PillowWriter
 import utils
 import main_opt_static as mos
 from itertools import product
@@ -71,7 +71,7 @@ def update(frame):
     p_wristR_init = global_positions[5] - global_positions[3]
     q_r = mos.inverse_kinematics(p_elbowR_init, p_wristR_init, d_uar, d_lar)
 
-    new_joint_angle_bounds = compress_bounds(joint_angle_bounds, q_r, optimal_q)
+    new_joint_angle_bounds = compress_bounds(joint_angle_bounds, q_r, optimal_q, compression_factor=0.3)
 
     # 为每个关节生成离散的角度
     joint_angle_ranges = [np.linspace(lower, upper, num_samples_per_joint) for lower, upper in new_joint_angle_bounds]
@@ -152,7 +152,8 @@ if __name__ == '__main__':
     skeleton_joint_name, skeleton_joints, skeleton_parent_indices, skeleton_joint_local_translation = utils.read_skeleton_motion(
         '/home/ubuntu/Ergo-Manip/data/demo_2_test_chenzui_only_optitrack2hotu.npy')
 
-    human_trajectory = generate_trajectory(-2, 0, math.pi / 2, len(skeleton_joints))
+    skeleton_joints = skeleton_joints[:200]
+    human_trajectory = generate_trajectory(0, 0, math.pi / 6, len(skeleton_joints))
 
     num_samples_per_joint = 8  # 每个关节的采样数
     fig = plt.figure()
@@ -160,6 +161,7 @@ if __name__ == '__main__':
 
     # 动画生成
     ani = FuncAnimation(fig, update, frames=len(skeleton_joints), repeat=True)
+    ani.save("/home/ubuntu/Ergo-Manip/vector_field/figs/animation_ergo_distribution.gif", writer=PillowWriter(fps=2))
     plt.show()
 
 

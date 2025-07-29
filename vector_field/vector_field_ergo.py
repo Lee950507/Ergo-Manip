@@ -76,7 +76,7 @@ if __name__ == '__main__':
 
     current_score = utils.calculate_upper_limb_score_with_joint_angles(current_q)
 
-    new_joint_angle_bounds = compress_bounds(joint_angle_bounds, current_q, compression_factor=0.05)
+    new_joint_angle_bounds = compress_bounds(joint_angle_bounds, current_q, compression_factor=1)
 
     # 为每个关节生成离散的角度
     num_samples_per_joint = 8  # 每个关节的采样数
@@ -176,20 +176,24 @@ if __name__ == '__main__':
     fig = plt.figure()
     ax = fig.add_subplot(111, projection='3d')
 
+    ax.set_xlim((-0.9, 0.9))
+    ax.set_ylim((-0.9, 0.9))
+    ax.set_zlim((0, 1.8))
+
     # 根据得分的高低选择颜色
     norm = Normalize(vmin=np.min(scores), vmax=np.max(scores))
     cmap = plt.get_cmap('coolwarm')  # 从蓝色到红色的渐变色
     colors = cmap(norm(scores))  # 应用颜色映射
 
     # 绘制散点
-    # ax.scatter(hand_positions[:, 0], hand_positions[:, 1], hand_positions[:, 2], c=colors, s=5)
+    ax.scatter(hand_positions[:, 0], hand_positions[:, 1], hand_positions[:, 2], c=colors, s=5)
 
     ax.scatter(optimal_position[0], optimal_position[1], optimal_position[2], c='red', s=50, label='optimal_position')
 
     # 绘制从参考点出发的向量（箭头颜色为绿色，长度 scale 可根据需要调整）
-    ax.quiver(ref_point[0], ref_point[1], ref_point[2],
-              vector_normalized[0], vector_normalized[1], vector_normalized[2],
-              length=0.1, normalize=True, color='green', alpha=0.8, label='Computed Vector')
+    # ax.quiver(ref_point[0], ref_point[1], ref_point[2],
+    #           vector_normalized[0], vector_normalized[1], vector_normalized[2],
+    #           length=0.1, normalize=True, color='green', alpha=0.8, label='Computed Vector')
 
     # 绘制每个点的向量（箭头），这里设置箭头长度scale为0.1，可根据实际情况调整
     # 注意：quiver 的 length 参数会自动调整箭头的长度
@@ -197,14 +201,6 @@ if __name__ == '__main__':
     # ax.quiver(hand_positions[::50, 0], hand_positions[::50, 1], hand_positions[::50, 2],
     #           vectors[::50, 0], vectors[::50, 1], vectors[::50, 2],
     #           length=0.08, normalize=True, color='blue', alpha=0.5)
-
-    x_ticks = np.arange(np.floor(hand_positions[:, 0].min()), np.ceil(hand_positions[:, 0].max()) + 1, 0.2)
-    y_ticks = np.arange(np.floor(hand_positions[:, 1].min()), np.ceil(hand_positions[:, 1].max()) + 1, 0.2)
-    z_ticks = np.arange(np.floor(hand_positions[:, 2].min()), np.ceil(hand_positions[:, 2].max()) + 0.5, 0.5)
-
-    ax.set_xticks(x_ticks)
-    ax.set_yticks(y_ticks)
-    ax.set_zticks(z_ticks)
 
     # 绘制骨架
     utils.plot_skeleton(ax, global_positions, skeleton_parent_indices, color='black')
