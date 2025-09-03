@@ -1,20 +1,60 @@
 # This is a Python script for bi-manual human-robot collaborative box carrying.
+from time import strftime
+
 import numpy as np
 import math
 from scipy.optimize import minimize
 import transformation as tsf
 import utils
 import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
 from scipy.spatial.transform import Rotation as R
-
+from datetime import datetime
 import rospy
 import message_filters
 from geometry_msgs.msg import PoseStamped
 
+import sys
+import os
+import subprocess
+import time
+import signal
+# 获取 ROS 工作空间的路径
+workspace_path = '/home/clover/catkin_ws'
+
+# 添加编译后的库路径
+sys.path.append(os.path.join(workspace_path, 'devel', 'lib'))
+
+from libpython_curi_dual_arm_ic import Python_CURI_Control
 
 last_relative_pose_wrists = None
 last_object_pose = None
+global ind
+ind = 1
 
+def launch_roslaunch():
+    launch_file = "~/catkin_ws/src/curi_whole_body_interface/launch/python_curi_dual_arm_ic_qbhand.launch"  # 替换为你的 launch 文件路径
+    # 启动 roslaunch
+    command = f"roslaunch {launch_file}"
+    return subprocess.Popen(command, shell=True)
+
+
+def vrpn_launch_roslaunch():
+    launch_file = "~/catkin_ws/src/vrpn_client_ros/launch/sample.launch"  # 替换为你的 launch 文件路径
+    # 启动 roslaunch
+    command = f"roslaunch {launch_file} server:=192.168.10.2"
+    return subprocess.Popen(command, shell=True)
+
+def signal_handler(sig, frame):
+    print('Python shutdown signal received...')
+    rospy.signal_shutdown("shutdown by manual")  # 标记节点为关闭
+    # 终止 roslaunch_process
+    if 'roslaunch_process' in locals():
+        print('Shutdown roslaunch process.')
+        roslaunch_process.terminate()
+        roslaunch_process.wait()  # 等待进程终止
+    print('Python shutdown.')
+    sys.exit(0)
 
 def transform_to_pose(pose_stamped):
     return np.array([
@@ -196,9 +236,9 @@ def quaternion_to_transformation_matrix(quaternion, translation):
 
     # Compute the rotation matrix from the quaternion
     R = np.array([
-        [1 - 2*(qy**2 + qz**2), 2*(qx*qy - qz*qw), 2*(qx*qz + qy*qw)],
-        [2*(qx*qy + qz*qw), 1 - 2*(qx**2 + qz**2), 2*(qy*qz - qx*qw)],
-        [2*(qx*qz - qy*qw), 2*(qy*qz + qx*qw), 1 - 2*(qx**2 + qy**2)]
+        [1 - 2 * (qy ** 2 + qz ** 2), 2 * (qx * qy - qz * qw), 2 * (qx * qz + qy * qw)],
+        [2 * (qx * qy + qz * qw), 1 - 2 * (qx ** 2 + qz ** 2), 2 * (qy * qz - qx * qw)],
+        [2 * (qx * qz - qy * qw), 2 * (qy * qz + qx * qw), 1 - 2 * (qx ** 2 + qy ** 2)]
     ])
 
     # Construct the transformation matrix
@@ -215,9 +255,9 @@ def quaternion_to_rotation_matrix(quaternion):
 
     # Compute the rotation matrix from the quaternion
     R = np.array([
-        [1 - 2*(qy**2 + qz**2), 2*(qx*qy - qz*qw), 2*(qx*qz + qy*qw)],
-        [2*(qx*qy + qz*qw), 1 - 2*(qx**2 + qz**2), 2*(qy*qz - qx*qw)],
-        [2*(qx*qz - qy*qw), 2*(qy*qz + qx*qw), 1 - 2*(qx**2 + qy**2)]
+        [1 - 2 * (qy ** 2 + qz ** 2), 2 * (qx * qy - qz * qw), 2 * (qx * qz + qy * qw)],
+        [2 * (qx * qy + qz * qw), 1 - 2 * (qx ** 2 + qz ** 2), 2 * (qy * qz - qx * qw)],
+        [2 * (qx * qz - qy * qw), 2 * (qy * qz + qx * qw), 1 - 2 * (qx ** 2 + qy ** 2)]
     ])
 
     return R
@@ -279,12 +319,48 @@ def relative_pose_constraint(x):
     elbow_left, wrist_left = forward_kinematics(x[4:], d_ual, d_lal)
 
     # Transformation
-    global_positions_wrist_right = global_positions[3] + [-wrist_right[1],-wrist_right[0], wrist_right[2]]
+    global_positions_wrist_right = global_positions[3] + [-wrist_right[1], -wrist_right[0], wrist_right[2]]
     global_positions_wrist_left = global_positions[6] + [-wrist_left[1], wrist_left[0], wrist_left[2]]
 
     # Compute relative pose between hands
     updated_relative_hand = euclidean_distance(global_positions_wrist_right, global_positions_wrist_left)
     return updated_relative_hand - last_relative_displacement_wrists
+
+
+def z_axes_constraint(x):
+    # Compute hand positions
+    elbow_right, wrist_right = forward_kinematics(x[:4], d_uar, d_lar)
+    elbow_left, wrist_left = forward_kinematics(x[4:], d_ual, d_lal)
+
+    # Transformation
+    global_positions_wrist_right = global_positions[3] + [-wrist_right[1], -wrist_right[0], wrist_right[2]]
+    global_positions_wrist_left = global_positions[6] + [-wrist_left[1], wrist_left[0], wrist_left[2]]
+
+    return global_positions_wrist_right[2] - global_positions_wrist_left[2]
+
+
+def x_axes_constraint(x):
+    # Compute hand positions
+    elbow_right, wrist_right = forward_kinematics(x[:4], d_uar, d_lar)
+    elbow_left, wrist_left = forward_kinematics(x[4:], d_ual, d_lal)
+
+    # Transformation
+    global_positions_wrist_right = global_positions[3] + [-wrist_right[1], -wrist_right[0], wrist_right[2]]
+    global_positions_wrist_left = global_positions[6] + [-wrist_left[1], wrist_left[0], wrist_left[2]]
+
+    return global_positions_wrist_right[0] - global_positions_wrist_left[0]
+
+
+def y_axes_constraint(x):
+    # Compute hand positions
+    elbow_right, wrist_right = forward_kinematics(x[:4], d_uar, d_lar)
+    elbow_left, wrist_left = forward_kinematics(x[4:], d_ual, d_lal)
+
+    # Transformation
+    global_positions_wrist_right = global_positions[3] + [-wrist_right[1], -wrist_right[0], wrist_right[2]]
+    global_positions_wrist_left = global_positions[6] + [-wrist_left[1], wrist_left[0], wrist_left[2]]
+    middle_shoulder = (global_positions[3, 1] + global_positions[6, 1]) / 2
+    return abs(global_positions_wrist_right[1] - middle_shoulder) - abs(global_positions_wrist_left[1] - middle_shoulder)
 
 
 def middle_position_constraint(x):
@@ -293,7 +369,7 @@ def middle_position_constraint(x):
     elbow_left, wrist_left = forward_kinematics(x[4:], d_ual, d_lal)
 
     # Transformation
-    global_positions_wrist_right = global_positions[3] + [-wrist_right[1],-wrist_right[0], wrist_right[2]]
+    global_positions_wrist_right = global_positions[3] + [-wrist_right[1], -wrist_right[0], wrist_right[2]]
     global_positions_wrist_left = global_positions[6] + [-wrist_left[1], wrist_left[0], wrist_left[2]]
 
     # Compute relative pose between hands
@@ -347,23 +423,25 @@ def objective_function(x):
     reba_score = max(overall_arm_score_left, overall_arm_score_right)
 
     reba_threshold = 1.7  # Define the ergonomic threshold
-    penalty_reba = 1000 * reba_score ** 2
+    penalty_reba = 900 * reba_score ** 2
 
     manip_right = manipulability_z_constraint(x[:4], d_uar, d_lar, arm='right')
     manip_left = manipulability_z_constraint(x[4:], d_ual, d_lal, arm='left')
-    manip_threshold = 4
+    manip_threshold = 5
 
     # if reba_score <= reba_threshold and manip_right >= manip_threshold and manip_left >= manip_threshold:
     #     print("Conditions met for early stopping.")
     #     return 0
 
-    penalty_manip_l = 100 * (manip_left - manip_threshold) ** 2
-    penalty_manip_r = 100 * (manip_right - manip_threshold) ** 2
+    penalty_manip_l = 10 * (manip_left - manip_threshold) ** 2
+    penalty_manip_r = 10 * (manip_right - manip_threshold) ** 2
 
-    regularization = 10 * np.sum(np.square(x[:4] - x[4:]))
+    regularization = 1 * np.sum(np.square(x[:4] - x[4:]))
+
+    # regularization_2 = 3000 * np.sum(np.square(global_positions[5, 2] - global_positions[8, 2])) ** 2
 
     # Total cost: REBA score + penalty + regularization
-    total_cost = penalty_reba + regularization + penalty_manip_r + penalty_manip_l
+    total_cost = penalty_reba + penalty_manip_r + penalty_manip_l + regularization
 
     return total_cost
 
@@ -372,7 +450,10 @@ def optimized_joints():
     # Initial_guess, constraints and bounds
     constraints = [
         {'type': 'eq', 'fun': relative_pose_constraint},  # Fixed relative pose
-        # {'type': 'eq', 'fun': middle_position_constraint},
+        {'type': 'eq', 'fun': z_axes_constraint},
+        # {'type': 'eq', 'fun': y_axes_constraint},
+        # {'type': 'eq', 'fun': x_axes_constraint},
+
     ]
     bounds = [
         (-math.pi / 18, 17 * math.pi / 18),
@@ -408,7 +489,7 @@ def optimized_joints():
     return optimized_angles
 
 
-def  optimizing_joint_angles(global_positions):
+def optimizing_joint_angles(global_positions):
     global last_relative_displacement_wrists, last_object_pose
 
     # Relative displacement of contact points
@@ -422,9 +503,16 @@ def  optimizing_joint_angles(global_positions):
     return joints_angles
 
 
-def draw_skeleton_and_robot(global_positions, skeleton_parent_indices, robot_left_pose, robot_right_pose, object_pose, q_r, q_l):
+def draw_skeleton_and_robot(global_positions, skeleton_parent_indices, robot_left_pose, robot_right_pose, object_pose,
+                            q_r, q_l):
     fig = plt.figure()
     ax = fig.add_subplot(111, projection='3d')
+
+    fig.patch.set_alpha(0)
+    ax.w_xaxis.pane.fill = False
+    ax.w_yaxis.pane.fill = False
+    ax.w_yaxis.pane.fill = False
+    ax.grid(False)
 
     utils.plot_skeleton(ax, global_positions, skeleton_parent_indices, color='blue')
 
@@ -460,13 +548,18 @@ def draw_skeleton_and_robot(global_positions, skeleton_parent_indices, robot_lef
     ax.tick_params(axis='both', which='major', labelsize=16)  # Major ticks
     ax.tick_params(axis='both', which='minor', labelsize=12)  # Minor ticks (if any)
 
+    ax.view_init(elev=0, azim=120)
+
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    fig.savefig(f'/home/cym/Chenzui/Ergo-Manip/data/fig/{timestamp}.png', dpi=300)
+
 
 def draw_orientation(ax, position, rotation_matrix, scale=0.3):
     # Transform the axes by the rotation matrix and plot
     for i in range(3):
         ax.quiver(position[0], position[1], position[2],
-                   scale * rotation_matrix[0, i], scale * rotation_matrix[1, i], scale * rotation_matrix[2, i],
-                   color=['black', 'black', 'black'][i], arrow_length_ratio=0.4)
+                  scale * rotation_matrix[0, i], scale * rotation_matrix[1, i], scale * rotation_matrix[2, i],
+                  color=['black', 'black', 'black'][i], arrow_length_ratio=0.4)
 
 
 # def multi_callback(sub_robot, sub_obejct, sub_shouL, sub_shouR, sub_elbowL, sub_elbowR, sub_wristL, sub_wristR):
@@ -571,26 +664,142 @@ def draw_orientation(ax, position, rotation_matrix, scale=0.3):
 #                             updated_robot_right_pose, object_updated_pose_matrix)
 
 
+def print_matrix(matrix):
+    for row in matrix:
+        print(", ".join(f"{x}," for x in row))
+
 if __name__ == '__main__':
-    # rospy.init_node('emo_hrc')
+    rospy.init_node('emo_hrc')
+    signal.signal(signal.SIGINT, signal_handler)
+        # 启动 roslaunch
+    roslaunch_process = launch_roslaunch()
+    time.sleep(1)  # 等待一段时间以确保 ROS 节点启动
+        # 启动控制器
+
+    curi = Python_CURI_Control(0, [])
+    curi.start()
+
+    time.sleep(1)  #
+    vrpn_roslaunch_process = vrpn_launch_roslaunch()
+
     subscriber_robot = rospy.wait_for_message('/vrpn_client_node/robot/pose', PoseStamped)
     subscriber_object = rospy.wait_for_message('/vrpn_client_node/object/pose', PoseStamped)
-    subscriber_shouL = rospy.wait_for_message ('/vrpn_client_node/shouL/pose', PoseStamped)
+    # subscriber_shouL = rospy.wait_for_message('/vrpn_client_node/shouL/pose', PoseStamped)
+    # subscriber_shouR = rospy.wait_for_message('/vrpn_client_node/shouR/pose', PoseStamped)
+    # subscriber_elbowL = rospy.wait_for_message('/vrpn_client_node/elbowL/pose', PoseStamped)
+    # subscriber_elbowR = rospy.wait_for_message('/vrpn_client_node/elbowR/pose', PoseStamped)
+    # subscriber_wristL = rospy.wait_for_message('/vrpn_client_node/wristL/pose', PoseStamped)
+    # subscriber_wristR = rospy.wait_for_message('/vrpn_client_node/wristR/pose', PoseStamped)
+
+    sub_robot = transform_to_pose(subscriber_robot)
+    sub_object = transform_to_pose(subscriber_object)
+
+    # Transform object pose from optitrack frame to robot frame
+    T_optitrack2robotbase = np.linalg.inv(
+            tsf.transform_optitrack_origin_to_optitrack_robot(
+                sub_robot) @ tsf.transform_optitrack_robot_to_robot_base())
+    object_pose_init = np.eye(4)
+    object_position_init = T_optitrack2robotbase[:3, :3] @ sub_object[:3] + T_optitrack2robotbase[:3, 3]
+    object_position_init = object_position_init + np.array([0, 0.0, -0.1])
+    object_rotation_temp = R.from_quat(sub_object[3:])
+    object_pose_orientation_matrix = object_rotation_temp.as_matrix()
+    object_orientation_init = T_optitrack2robotbase[:3, :3] @ object_pose_orientation_matrix
+    object_pose_init[:3, :3] = object_orientation_init
+    object_pose_init[:3, 3] = object_position_init
+    print(tsf.transform_optitrack_origin_to_optitrack_robot(
+                sub_robot))
+    print(tsf.transform_optitrack_robot_to_robot_base())
+    print(T_optitrack2robotbase[:3, :3] @ sub_object[:3])
+    print(T_optitrack2robotbase)
+    print('object_pose_init', object_pose_init)
+
+    # Object & Robot initial EE pose
+    robot_left_position_init = object_position_init + np.array([-0.32, 0.15, 0.0])
+    robot_right_position_init = object_position_init + np.array([-0.32, -0.15, 0.0])
+    # robot_left_position_init = object_position_init + np.array([-0.45, 0.15, 0.0])
+    # robot_right_position_init = object_position_init + np.array([-0.45, -0.15, 0.0])
+    # robot_left_position_init = object_position_init + np.array([-0.33, 0.12, 0.0])
+    # robot_right_position_init = object_position_init + np.array([-0.33, -0.12, 0.0])
+    # robot_left_position_init = object_position_init + np.array([-0.3, 0.2, -0.2])
+    # robot_right_position_init = object_position_init + np.array([-0.3, -0.2, -0.2])
+    # robot_left_pose_init = np.array([0.8, 0.4, 1.4, 0, 0, 0, 1])
+    # robot_right_pose_init = np.array([0.8, -0.4, 1.4, 0, 0, 0, 1])
+    robot_left_position_init_2 = robot_left_position_init + np.array([0, 0, 0.2])
+    robot_right_position_init_2 = robot_right_position_init + np.array([0, 0, 0.2])
+
+    robot_left_rotation_matrix_init = np.array([[1, 0, 0], [0, 0, -1], [0, 1, 0]])
+    robot_right_rotation_matrix_init = np.array([[-1, 0, 0], [0, 0, 1], [0, 1, 0]])
+
+    # waypoint 1
+    robot_left_pose_matrix_init = np.r_[
+        np.c_[robot_left_rotation_matrix_init, robot_left_position_init.T], np.array([[0, 0, 0, 1]])]
+    robot_right_pose_matrix_init = np.r_[
+        np.c_[robot_right_rotation_matrix_init, robot_right_position_init.T], np.array([[0, 0, 0, 1]])]
+
+    robot_left_pose_init = np.append(robot_left_position_init,
+                                     R.from_matrix(robot_left_rotation_matrix_init).as_quat())
+    robot_right_pose_init = np.append(robot_right_position_init,
+                                      R.from_matrix(robot_right_rotation_matrix_init).as_quat())
+
+    # waypoint 2
+    robot_left_pose_matrix_init_2 = np.r_[
+        np.c_[robot_left_rotation_matrix_init, robot_left_position_init_2.T], np.array([[0, 0, 0, 1]])]
+    robot_right_pose_matrix_init_2 = np.r_[
+        np.c_[robot_right_rotation_matrix_init, robot_right_position_init_2.T], np.array([[0, 0, 0, 1]])]
+
+    robot_left_pose_init_2 = np.append(robot_left_position_init_2,
+                                       R.from_matrix(robot_left_rotation_matrix_init).as_quat())
+    robot_right_pose_init_2 = np.append(robot_right_position_init_2,
+                                        R.from_matrix(robot_right_rotation_matrix_init).as_quat())
+
+    # initial_robot_left_rotation_matrix = np.array([[1, 0, 0, 0.6], [0, 0, -1, 0.3], [0, 1, 0, -0.15], [0, 0, 0, 1]])
+    # initial_robot_right_rotation_matrix = np.array([[-1, 0, 0, 0.6], [0, 0, 1, -0.3], [0, 1, 0, -0.15], [0, 0, 0, 1]])
+
+    # initial_robot_left_pose_matrix = quaternion_to_transformation_matrix(robot_left_pose_init[3:],
+    #                                                                      robot_left_pose_init[:3])
+    # initial_robot_right_pose_matrix = quaternion_to_transformation_matrix(robot_right_pose_init[3:],
+    #                                                                       robot_right_pose_init[:3])
+
+    # GO to robot init poses
+
+    base2torso_matrix = np.array([[1, 0, 0, -0.29], [0, 1, 0, 0], [0, 0, 1, -0.985], [0, 0, 0, 1]])
+    initial_robot_left_pose_matrix = base2torso_matrix @ robot_left_pose_matrix_init
+    initial_robot_right_pose_matrix = base2torso_matrix @ robot_right_pose_matrix_init
+
+    curi.set_tcp_moveL(initial_robot_left_pose_matrix, initial_robot_right_pose_matrix)
+
+    initial_robot_left_pose_matrix_2 = base2torso_matrix @ robot_left_pose_matrix_init_2
+    initial_robot_right_pose_matrix_2 = base2torso_matrix @ robot_right_pose_matrix_init_2
+
+    curi.set_tcp_moveL(initial_robot_left_pose_matrix_2, initial_robot_right_pose_matrix_2)
+
+    rospy.sleep(35)
+
+    subscriber_object = rospy.wait_for_message('/vrpn_client_node/object/pose', PoseStamped)
+    subscriber_shouL = rospy.wait_for_message('/vrpn_client_node/shouL/pose', PoseStamped)
     subscriber_shouR = rospy.wait_for_message('/vrpn_client_node/shouR/pose', PoseStamped)
     subscriber_elbowL = rospy.wait_for_message('/vrpn_client_node/elbowL/pose', PoseStamped)
     subscriber_elbowR = rospy.wait_for_message('/vrpn_client_node/elbowR/pose', PoseStamped)
     subscriber_wristL = rospy.wait_for_message('/vrpn_client_node/wristL/pose', PoseStamped)
     subscriber_wristR = rospy.wait_for_message('/vrpn_client_node/wristR/pose', PoseStamped)
 
-    sub_robot = transform_to_pose(subscriber_robot)
     sub_object = transform_to_pose(subscriber_object)
-
     sub_shouL = transform_to_pose(subscriber_shouL)
     sub_shouR = transform_to_pose(subscriber_shouR)
     sub_elbowL = transform_to_pose(subscriber_elbowL)
     sub_elbowR = transform_to_pose(subscriber_elbowR)
     sub_wristL = transform_to_pose(subscriber_wristL)
     sub_wristR = transform_to_pose(subscriber_wristR)
+
+    object_pose_init_2 = np.eye(4)
+    object_position_init = T_optitrack2robotbase[:3, :3] @ sub_object[:3] + T_optitrack2robotbase[:3, 3]
+    object_position_init = object_position_init + np.array([0, 0, -0.1])
+    object_rotation_temp = R.from_quat(sub_object[3:])
+    object_pose_orientation_matrix = object_rotation_temp.as_matrix()
+    object_orientation_init = T_optitrack2robotbase[:3, :3] @ object_pose_orientation_matrix
+    object_pose_init_2[:3, :3] = object_orientation_init
+    object_pose_init_2[:3, 3] = object_position_init
+    print('object_pose_init_2', object_pose_init_2)
 
     # sub_robot = np.array([-0.2195, 1.11462, 0, 0, 0, 0, 1])
     # sub_object = np.array([1.3, 1.3, 0, 0, 0, 0, 1])
@@ -603,9 +812,6 @@ if __name__ == '__main__':
     # sub_wristR = np.array([1.8, 1.4, -0.3, 0, 0, 0, 1])
 
     # Transform from optitrack frame to robot frame
-    T_optitrack2robotbase = np.linalg.inv(
-        tsf.transform_optitrack_origin_to_optitrack_robot(
-            sub_robot) @ tsf.transform_optitrack_robot_to_robot_base())
     shouL_position_init = T_optitrack2robotbase[:3, :3] @ sub_shouL[:3] + T_optitrack2robotbase[:3, 3]
     shouR_position_init = T_optitrack2robotbase[:3, :3] @ sub_shouR[:3] + T_optitrack2robotbase[:3, 3]
     elbowL_position_init = T_optitrack2robotbase[:3, :3] @ sub_elbowL[:3] + T_optitrack2robotbase[:3, 3]
@@ -615,7 +821,9 @@ if __name__ == '__main__':
     print(shouL_position_init, shouR_position_init)
 
     # Body dimensions
-    d_ual, d_uar, d_lal, d_lar = calculate_arm_dimensions(shouL_position_init, elbowL_position_init, wristL_position_init, shouR_position_init, elbowR_position_init, wristR_position_init)
+    d_ual, d_uar, d_lal, d_lar = calculate_arm_dimensions(shouL_position_init, elbowL_position_init,
+                                                          wristL_position_init, shouR_position_init,
+                                                          elbowR_position_init, wristR_position_init)
 
     # Transform from robot frame to each shoulder frame
     p_elbowL_init = elbowL_position_init - shouL_position_init
@@ -633,63 +841,31 @@ if __name__ == '__main__':
     q_r = inverse_kinematics(p_elbowR_init, p_wristR_init, d_uar, d_lar)
     initial_guess = np.concatenate((q_r, q_l))
 
-    # Transform object pose from optitrack frame to robot frame
-    object_pose_init = np.eye(4)
-    object_position_init = T_optitrack2robotbase[:3, :3] @ sub_object[:3] + T_optitrack2robotbase[:3, 3]
-    object_rotation_temp = R.from_quat(sub_object[3:])
-    object_pose_orientation_matrix = object_rotation_temp.as_matrix()
-    object_orientation_init = T_optitrack2robotbase[:3, :3] @ object_pose_orientation_matrix
-    object_pose_init[:3, :3] = object_orientation_init
-    object_pose_init[:3, 3] = object_position_init
-    print(object_pose_init)
-
     # Skeleton Model
     skeleton_joint_name, skeleton_joint, skeleton_parent_indices, skeleton_joint_local_translation = utils.read_skeleton_motion(
-        '/home/curi/Chenzui/Ergo-Manip-main/data/demo_data/demo_2_test_andrew_only_optitrack2hotu.npy')
-    skeleton_joint = skeleton_joint[450, :]
+        '/home/cym/Chenzui/Ergo-Manip/data/demo_2_test_chenzui_only_optitrack2hotu.npy')
+    skeleton_joint = skeleton_joint[400, :]
     global_positions, global_rotations = utils.forward_kinematics(skeleton_joint_local_translation,
                                                                   skeleton_joint, skeleton_parent_indices)
-    global_positions[:, 2] = global_positions[:, 2] * 1.2  # Body Dimension Scaling
+    global_positions[:, :] = global_positions[:, :] * 0.9 # Body Dimension Scaling
 
     # Transformation
-    # global_positions[3] = np.array([0, - (shouR_position_init[1] - shouL_position_init[1]) / 2, shouR_position_init[2]])
-    # global_positions[3] = np.array([0, - (shouR_position_init[1] - shouL_position_init[1]) / 2, shouR_position_init[2]])
+    shou_center = (shouL_position_init + shouR_position_init) / 2
+    global_positions = global_positions + np.array([shou_center[0], shou_center[1], 0])
+    global_positions[3, 2] = shou_center[2]
+    global_positions[6, 2] = shou_center[2]
+
     global_positions[4] = global_positions[3] + (elbowR_position_init - shouR_position_init)
     global_positions[7] = global_positions[6] + (elbowL_position_init - shouL_position_init)
     global_positions[5] = global_positions[3] + (wristR_position_init - shouR_position_init)
     global_positions[8] = global_positions[6] + (wristL_position_init - shouL_position_init)
 
-    shou_center = (shouL_position_init + shouR_position_init) / 2
-    global_positions = global_positions + np.array([shou_center[0], shou_center[1], 0])
     initial_wrist_position = np.array([global_positions[5],
                                        global_positions[8]])
-    print("init", initial_wrist_position)
+    print("init wrist position", initial_wrist_position)
 
-    # Object & Robot initial EE pose
-    robot_left_position_init = object_position_init + np.array([-0.8, 0.3, 0.2])
-    robot_right_position_init = object_position_init + np.array([-0.8, -0.3, 0.2])
-    # robot_left_pose_init = np.array([0.8, 0.4, 1.4, 0, 0, 0, 1])
-    # robot_right_pose_init = np.array([0.8, -0.4, 1.4, 0, 0, 0, 1])
-
-    robot_left_rotation_matrix_init = np.array([[1, 0, 0], [0, 0, -1], [0, 1, 0]])
-    robot_right_rotation_matrix_init = np.array([[-1, 0, 0], [0, 0, 1], [0, 1, 0]])
-
-    robot_left_pose_matrix_init = np.r_[np.c_[robot_left_rotation_matrix_init, robot_left_position_init.T], np.array([[0, 0, 0, 1]])]
-    robot_right_pose_matrix_init = np.r_[np.c_[robot_right_rotation_matrix_init, robot_right_position_init.T], np.array([[0, 0, 0, 1]])]
-
-    robot_left_pose_init = np.append(robot_left_position_init, R.from_matrix(robot_left_rotation_matrix_init).as_quat())
-    robot_right_pose_init = np.append(robot_right_position_init, R.from_matrix(robot_right_rotation_matrix_init).as_quat())
-
-    # initial_robot_left_rotation_matrix = np.array([[1, 0, 0, 0.6], [0, 0, -1, 0.3], [0, 1, 0, -0.15], [0, 0, 0, 1]])
-    # initial_robot_right_rotation_matrix = np.array([[-1, 0, 0, 0.6], [0, 0, 1, -0.3], [0, 1, 0, -0.15], [0, 0, 0, 1]])
-
-    # initial_robot_left_pose_matrix = quaternion_to_transformation_matrix(robot_left_pose_init[3:],
-    #                                                                      robot_left_pose_init[:3])
-    # initial_robot_right_pose_matrix = quaternion_to_transformation_matrix(robot_right_pose_init[3:],
-    #                                                                       robot_right_pose_init[:3])
-
-    draw_skeleton_and_robot(global_positions, skeleton_parent_indices, robot_left_pose_init, robot_right_pose_init,
-                            object_pose_init, q_r, q_l)
+    draw_skeleton_and_robot(global_positions, skeleton_parent_indices, robot_left_pose_init_2, robot_right_pose_init_2,
+                            object_pose_init_2, q_r, q_l)
 
     # Optimization
     # optimized_angles = optimizing_joint_angles(global_positions[6], global_positions[3], global_positions[7],
@@ -698,54 +874,93 @@ if __name__ == '__main__':
 
     updated_wrist_position = np.array([global_positions[5],
                                        global_positions[8]])
-    print("update", updated_wrist_position)
+    print("update wrist position", updated_wrist_position)
 
-    object_updated_pose_matrix, object_updated_rotation = compute_updated_object_pose(object_pose_init,
+    object_updated_pose_matrix, object_updated_rotation = compute_updated_object_pose(object_pose_init_2,
                                                                                       initial_wrist_position,
                                                                                       updated_wrist_position)
-    print("Updated Pose:\n", object_updated_pose_matrix)
+    print('object_pose_init', object_pose_init_2)
+    print('initial_wrist_position', initial_wrist_position)
+    print('updated_wrist_position', updated_wrist_position)
+    print("object updated Pose:\n", object_updated_pose_matrix)
 
-    updated_robot_left_position = update_additional_points(object_pose_init, object_updated_pose_matrix,
-                                                           robot_left_pose_matrix_init[:3, 3], object_updated_rotation)
-    updated_robot_right_position = update_additional_points(object_pose_init, object_updated_pose_matrix,
-                                                            robot_right_pose_matrix_init[:3, 3], object_updated_rotation)
+
+    updated_robot_left_position = update_additional_points(object_pose_init_2, object_updated_pose_matrix,
+                                                           robot_left_pose_matrix_init_2[:3, 3], object_updated_rotation)
+    updated_robot_right_position = update_additional_points(object_pose_init_2, object_updated_pose_matrix,
+                                                            robot_right_pose_matrix_init_2[:3, 3],
+                                                            object_updated_rotation)
 
     updated_robot_left_rotation = (
-            object_updated_rotation * R.from_matrix(robot_left_pose_matrix_init[:3, :3])).as_quat()
+            object_updated_rotation * R.from_matrix(robot_left_pose_matrix_init_2[:3, :3])).as_quat()
     updated_robot_right_rotation = (
-            object_updated_rotation * R.from_matrix(robot_right_pose_matrix_init[:3, :3])).as_quat()
+            object_updated_rotation * R.from_matrix(robot_right_pose_matrix_init_2[:3, :3])).as_quat()
 
     updated_robot_left_pose = np.append(updated_robot_left_position, updated_robot_left_rotation)
     updated_robot_right_pose = np.append(updated_robot_right_position, updated_robot_right_rotation)
     # print("left_qua", updated_robot_left_pose)
 
-    updated_robot_left_pose_matrix = quaternion_to_transformation_matrix(updated_robot_left_rotation, updated_robot_left_position)
-    updated_robot_right_pose_matrix = quaternion_to_transformation_matrix(updated_robot_right_rotation, updated_robot_right_position)
+    updated_robot_left_pose_matrix = quaternion_to_transformation_matrix(updated_robot_left_rotation,
+                                                                         updated_robot_left_position)
+    updated_robot_right_pose_matrix = quaternion_to_transformation_matrix(updated_robot_right_rotation,
+                                                                          updated_robot_right_position)
+
 
     print("initial_robot_left_pose", robot_left_pose_matrix_init)
     print("initial_robot_right_pose", robot_right_pose_matrix_init)
     print("updated_robot_left_pose", updated_robot_left_pose_matrix)
     print("updated_robot_right_pose", updated_robot_right_pose_matrix)
+    print_matrix(robot_left_pose_matrix_init)
+    print_matrix(robot_right_pose_matrix_init)
+    print_matrix(updated_robot_left_pose_matrix)
+    print_matrix(updated_robot_right_pose_matrix)
+
     # print(updated_robot_left_pose)
     # print(global_positions[8])
     # print(global_positions[5])
 
     draw_skeleton_and_robot(global_positions, skeleton_parent_indices, updated_robot_left_pose,
-                            updated_robot_right_pose, object_updated_pose_matrix, optimized_angles[:4], optimized_angles[4:])
+                            updated_robot_right_pose, object_updated_pose_matrix, optimized_angles[:4],
+                            optimized_angles[4:])
+
+
 
     # Show the plot
+
     plt.show()
 
 
-    # torso joint states
-    # position: [0.0023761664051562548, -0.853187084197998, 0.5779626369476318]
+    updated_robot_left_pose = base2torso_matrix @ updated_robot_left_pose_matrix
+    updated_robot_right_pose = base2torso_matrix @ updated_robot_right_pose_matrix
+
+    curi.set_tcp_moveL(updated_robot_left_pose, updated_robot_right_pose)
+
+    standby_robot_left_matrix = np.array([[1, 0, 0, 0.6], [0, 0, -1, 0.3], [0, 1, 0, -0.15], [0, 0, 0, 1]])
+    standby_robot_right_matrix = np.array([[-1, 0, 0, 0.6], [0, 0, 1, -0.3], [0, 1, 0, -0.15], [0, 0, 0, 1]])
+
+    curi.set_tcp_moveL(initial_robot_left_pose_matrix, initial_robot_right_pose_matrix)
+
+    curi.set_tcp_moveL(standby_robot_left_matrix, standby_robot_right_matrix)
+
+    rate = rospy.Rate(10)  # 10 Hz
+    itrr_num = 0
+
+    while not rospy.is_shutdown() | curi.isshutdown():
+        itrr_num = itrr_num + 1
+        # if itrr_num % 10 == 0:
+            # print("robot_left_pose", curi.get_tcp(0))
+            # print("robot_right_pose"
+            #       , curi.get_tcp(1))
+
+        # data = [[1.0, 2.0, 3.0, 4.0],
+        #         [5.0, 6.0, 7.0, 8.0],
+        #         [9.0, 10.0, 11.0, 12.0],
+        #         [13.0, 14.0, 15.0, 16.0]]
+        # data_array = np.array(data, dtype=np.float64)
+        # curi.set_tcp_moveL(0, data_array)
+        rate.sleep()  # 使用 rospy.Rate.sleep() 代替 time.sleep()
 
 
 
-
-
-
-
-
-
-
+# torso joint states
+# position: [0.0023761664051562548, -0.853187084197998, 0.5779626369476318]

@@ -311,78 +311,123 @@ def update(frame):
 def run_iterations(num_iterations):
     global current_q, global_positions, trajectory_hand, trajectory_elbow, score_history, joint_history
 
-    # 执行所有迭代
-    for frame in range(num_iterations):
-        # 原update函数的内容，但不重置图形
-        global_positions_copy = global_positions.copy()
+    # 定义CSEF场所需参数
+    q_opt = optimal_q  # 最优关节角度配置
+    weights = np.array([1.0, 1.0, 1.0, 2.0])  # 关节角度权重
+    comfort_threshold = 0.1  # 舒适阈值
+    alpha = 0.7  # 目标吸引力权重
+    beta = 0.3  # 人体工学舒适度权重
+    step_size = 0.05  # 步长
 
-        new_bounds = compress_bounds(joint_angle_bounds, current_q, compression_factor=comp_factor)
-        joint_angle_ranges = [np.linspace(lower, upper, num_samples_per_joint) for lower, upper in new_bounds]
+    # 用于保存结果的数组
+    trajectory = []
+    q_current = current_q.copy()
+    q_goal = optimal_q.copy()  # 目标关节角度配置
 
-        q_combinations = np.array(list(product(*joint_angle_ranges)))
+    print("Planning trajectory using CSEF guidance...")
 
-        scores = []
-        candidate_elbows = []
-        candidate_hands = []
+    # 计算SEF值 (Signed Ergonomics Field)
+    def calculate_sef(q, q_opt, weights, comfort_threshold):
+        ergo_score = utils.calculate_upper_limb_score_with_joint_angles(q)
+        score_history.append(ergo_score)
+        return ergo_score - comfort_threshold
 
-        for q in q_combinations:
-            elbow_cand, hand_cand = mos.forward_kinematics(q, d_uar, d_lar)
-            hand_cand = trans_shoulder2global(hand_cand, shoulder, arm='right')
-            elbow_cand = trans_shoulder2global(elbow_cand, shoulder, arm='right')
+    # 计算SEF梯度 (方向指向不舒适度增加的方向)
+    def calculate_sef_gradient(q, q_opt, weights, comfort_threshold, delta=1e-6):
+        grad = np.zeros_like(q)
+        sef_q = calculate_sef(q, q_opt, weights, comfort_threshold)
 
-            candidate_elbows.append(elbow_cand)
-            candidate_hands.append(hand_cand)
-            s = utils.calculate_upper_limb_score_with_joint_angles(q)
-            scores.append(s)
+        for i in range(len(q)):
+            q_plus = q.copy()
+            q_plus[i] += delta
+            sef_plus = calculate_sef(q_plus, q_opt, weights, comfort_threshold)
+            grad[i] = (sef_plus - sef_q) / delta
 
-        scores = np.array(scores)
-        candidate_elbows = np.array(candidate_elbows)
-        candidate_hands = np.array(candidate_hands)
+        return grad
 
-        # ref_point = global_positions[8]
-        ref_point = global_positions[5]
+    # 确保关节角度在限制范围内
+    def enforce_joint_limits(q, bounds):
+        q_limited = np.copy(q)
+        for i in range(len(q)):
+            q_limited[i] = max(bounds[i][0], min(bounds[i][1], q[i]))
+        return q_limited
 
-        ## Find the neighbor with the lowest ergo score
-        target_idx = np.argmin(scores)
-        candidate_q = q_combinations[target_idx]
+    # 添加初始位置到轨迹
+    trajectory.append(q_current)
 
-        new_elbow = candidate_elbows[target_idx]
-        new_hand = candidate_hands[target_idx]
+    # 主循环：使用CSEF指导的梯度下降
+    for step in range(num_iterations):
+        # 计算指向目标的向量
+        goal_direction = q_goal - q_current
+        goal_distance = np.linalg.norm(goal_direction)
 
-        dist = np.linalg.norm(new_hand - ref_point)
-        if dist > max_disp:
-            ratio = max_disp / dist
+        # 如果足够接近目标，结束轨迹
+        if goal_distance < 0.05:
+            trajectory.append(q_goal)
+            break
+
+        # 归一化目标方向
+        if goal_distance > 0:
+            goal_direction = goal_direction / goal_distance
+
+        # 获取SEF梯度（不舒适度增加的方向）
+        sef_gradient = calculate_sef_gradient(q_current, q_opt, weights, comfort_threshold)
+        sef_gradient_norm = np.linalg.norm(sef_gradient)
+
+        # 归一化SEF梯度（如果非零）
+        if sef_gradient_norm > 0:
+            sef_gradient = sef_gradient / sef_gradient_norm
+
+        # 组合目标方向和负SEF梯度（朝向更舒适的方向）
+        combined_direction = alpha * goal_direction - beta * sef_gradient
+        combined_norm = np.linalg.norm(combined_direction)
+
+        if combined_norm > 0:
+            # 归一化并移动一步
+            combined_direction = combined_direction / combined_norm
+            q_next = q_current + step_size * combined_direction
         else:
-            ratio = 1.0
+            # 如果方向相互抵消，优先考虑目标方向
+            q_next = q_current + step_size * goal_direction
 
-        new_q = current_q + ratio * (candidate_q - current_q)
+        # 确保关节角度在限制范围内
+        q_next = enforce_joint_limits(q_next, joint_angle_bounds)
 
-        new_elbow, new_hand = mos.forward_kinematics(new_q, d_uar, d_lar)
+        # 使用前向运动学计算新的手肘和手腕位置
+        new_elbow, new_hand = mos.forward_kinematics(q_next, d_uar, d_lar)
         new_hand = trans_shoulder2global(new_hand, shoulder, arm='right')
         new_elbow = trans_shoulder2global(new_elbow, shoulder, arm='right')
 
-        current_q = new_q
+        # 添加到轨迹并更新当前位置
+        trajectory.append(q_next)
+        q_current = q_next
+        joint_history.append(q_next.copy())
 
-        s = utils.calculate_upper_limb_score_with_joint_angles(current_q)
-        score_history.append(s)
-
-        # global_positions[7] = new_elbow
-        # global_positions[8] = new_hand
+        # 更新全局位置数组
         global_positions[4] = new_elbow
         global_positions[5] = new_hand
 
-        # 将新位置加入轨迹（便于绘制轨迹）
+        # 将新位置添加到手腕和肘部轨迹
         trajectory_hand.append(new_hand.copy())
         trajectory_elbow.append(new_elbow.copy())
-        joint_history.append(new_q.copy())
 
-        print(f"Iteration {frame + 1}/{num_iterations} completed. Current score: {s:.4f}")
+        # 自适应步长：接近目标时减小
+        step_size = min(0.05, goal_distance * 0.2)
+
+        print(f"Iteration {step + 1}/{num_iterations} completed. Current score: {score_history[-1]:.4f}")
+
+    # 设置最终配置为当前配置
+    current_q = q_current
 
     # 迭代完成后绘制最终结果
     ax.set_xlim((0.7, 2.2))
     ax.set_ylim((-0.7, 0.8))
     ax.set_zlim((0.0, 1.5))
     ax.view_init(elev=30, azim=-30)
+
+    # 获取最终位置
+    new_elbow = global_positions[4]
+    new_hand = global_positions[5]
 
     # 绘制肩部、肘部、手腕点（用不同颜色标记），以及轨迹
     ax.scatter(shoulder[0], shoulder[1], shoulder[2], c='black', s=50, label='Shoulder')
@@ -408,7 +453,7 @@ def run_iterations(num_iterations):
     ax.set_xlabel('X Position')
     ax.set_ylabel('Y Position')
     ax.set_zlabel('Z Position')
-    ax.set_title(f'Final Result after {num_iterations} Iterations')
+    ax.set_title(f'Final Result after {num_iterations} Iterations (CSEF Method)')
     ax.legend()
 
     plt.show()
@@ -418,8 +463,20 @@ def run_iterations(num_iterations):
     plt.plot(range(1, len(score_history) + 1), score_history)
     plt.xlabel('Iteration')
     plt.ylabel('Ergonomic Score')
-    plt.title('Ergonomic Score History')
+    plt.title('Ergonomic Score History (CSEF Method)')
     plt.grid(True)
+    plt.show()
+
+    # 可选：绘制SEF值历史趋势
+    sef_values = [score - comfort_threshold for score in score_history]
+    plt.figure(figsize=(10, 6))
+    plt.plot(range(1, len(sef_values) + 1), sef_values)
+    plt.axhline(y=0, color='r', linestyle='--', label='Comfort Threshold')
+    plt.xlabel('Iteration')
+    plt.ylabel('SEF Value')
+    plt.title('Signed Ergonomics Field Values (CSEF Method)')
+    plt.grid(True)
+    plt.legend()
     plt.show()
 
     return trajectory_hand, trajectory_elbow, joint_history, score_history
