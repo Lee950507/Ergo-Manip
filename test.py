@@ -1,80 +1,136 @@
 import numpy as np
-from scipy.spatial.transform import Rotation as R
-
-def compute_updated_object_pose(initial_pose, initial_points, updated_points):
-    # Extract rotation and translation from the initial pose
-    rotation_initial = initial_pose[:3, :3]
-    translation_initial = initial_pose[:3, 3]
-
-    # Compute the vector for the initial and updated second points
-    vector_initial = initial_points[1] - initial_points[0]
-    vector_updated = updated_points[1] - updated_points[0]
-
-    # Normalize the vectors
-    vector_initial_normalized = vector_initial / np.linalg.norm(vector_initial)
-    vector_updated_normalized = vector_updated / np.linalg.norm(vector_updated)
-
-    # Calculate the rotation required to align the initial vector with the updated vector
-    rotation_vector = np.cross(vector_initial_normalized, vector_updated_normalized)
-    angle_of_rotation = np.arccos(np.clip(np.dot(vector_initial_normalized, vector_updated_normalized), -1.0, 1.0))
-
-    # Create a rotation matrix using the rotation vector and angle
-    if np.linalg.norm(rotation_vector) > 1e-6:  # Avoid division by zero
-        rotation = R.from_rotvec(rotation_vector * angle_of_rotation)
-    else:
-        rotation = R.identity()
-
-    # Update the rotation of the initial pose
-    updated_rotation = rotation * R.from_matrix(rotation_initial)
-
-    # Calculate the vectors from the initial pose to the initial points
-    vector_initial_1 = translation_initial - initial_points[0]
-
-    # Apply the rotation to the initial vectors
-    rotated_vector_1 = rotation.apply(vector_initial_1)
-    translation_updated = updated_points[0] + rotated_vector_1
-
-    # Construct the updated pose
-    updated_pose = np.eye(4)
-    updated_pose[:3, :3] = updated_rotation.as_matrix()
-    updated_pose[:3, 3] = translation_updated  # Set the updated translation
-
-    return updated_pose, rotation
+import matplotlib.pyplot as plt
+import main_opt_static as mos
+import transformation as tsf
+import utils
 
 
-def update_additional_points(initial_pose, updated_pose, robot_point, rotation):
-    initial_position = initial_pose[:3, 3]
-    updated_position = updated_pose[:3, 3]
-    vector_initial = robot_point - initial_position
-    rotated_vector_1 = rotation.apply(vector_initial)
-    updated_point = updated_position + rotated_vector_1
-    return updated_point
+def trans_global2shoulder(shoulder, elbow, wrist, arm='left'):
+    if arm == 'left':
+        elbow_new = elbow - shoulder
+        elbow_new = np.array([elbow_new[1], -elbow_new[0], elbow_new[2]])
+        wrist_new = wrist - shoulder
+        wrist_new = np.array([wrist_new[1], -wrist_new[0], wrist_new[2]])
+    if arm == 'right':
+        elbow_new = elbow - shoulder
+        elbow_new = np.array([-elbow_new[1], -elbow_new[0], elbow_new[2]])
+        wrist_new = wrist - shoulder
+        wrist_new = np.array([-wrist_new[1], -wrist_new[0], wrist_new[2]])
+    return elbow_new, wrist_new
 
 
-# Example usage:
-# Initial pose (4x4 transformation matrix)
-initial_pose = np.array([[ 1.,   0.,   0.,   1.3],
- [ 0.,   0.,  -1.,  0. ],
- [ 0.,   1.,   0.,   1.4],
- [ 0.,   0.,   0.,   1. ]])
+# Load data
+optimized_joints = np.load(
+    "/home/ubuntu/Ergo-Manip/data/data_CSEF_comparison_0911/20250911_CSEF/posture 1/optimized_joint_angles.npy",
+    allow_pickle=True)
+recorded_data = np.load(
+    "/home/ubuntu/Ergo-Manip/data/data_CSEF_comparison_0911/20250911_CSEF/posture 1/recorded_human_positions.npy",
+    allow_pickle=True).item()
 
-# Initial positions of two points on the object (2x3)
-initial_points = np.array([[ 1.84565942,  0.20162924,  1.44610119],
- [ 1.82866393, -0.16297343,  1.28196371]])
+# Extract data components
+timestamps = np.array(recorded_data['timestamps'])[::10]
+shoulder_positions = np.array(recorded_data['shoulder_positions'])[::10]
+elbow_positions = np.array(recorded_data['elbow_positions'])[::10]
+wrist_positions = np.array(recorded_data['wrist_positions'])[::10]
 
-# Updated positions of the two points in Cartesian space (2x3)
-updated_points = np.array([[ 1.9158142,   0.28917484,  1.2548238 ],
- [ 1.89903483, -0.24794107,  1.28982309]])  # New positions of the points
+sub_robot = np.array([-0.2195, 1.11462, 0, 0, 0, 0, 1])
+T_optitrack2robotbase = np.linalg.inv(
+    tsf.transform_optitrack_origin_to_optitrack_robot(
+        sub_robot) @ tsf.transform_optitrack_robot_to_robot_base())
 
-# Compute the updated pose
-updated_pose, rotation = compute_updated_object_pose(initial_pose, initial_points, updated_points)
-print("Updated Pose:\n", updated_pose)
+# Array to store the calculated joint angles from human data
+calculated_joints = []
+ergonomic_scores_calculated = []
+ergonomic_scores_optimized = []
 
-# Initial positions of two additional points on the object (2x3)
-additional_points = np.array([-1, 1, 1])
+# Process each time step
+for i in range(len(timestamps)):
+    shoulder_pos = shoulder_positions[i, :3]
+    elbow_pos = elbow_positions[i, :3]
+    wrist_pos =  wrist_positions[i, :3]
 
-# Update the positions of the additional points
-updated_additional_points = update_additional_points(initial_pose, updated_pose, additional_points, rotation)
+    d_ual, d_uar, d_lal, d_lar = mos.calculate_arm_dimensions(shoulder_pos, elbow_pos,
+                                                              wrist_pos, shoulder_pos,
+                                                              elbow_pos, wrist_pos)
+    p_elbowR_init, p_wristR_init = trans_global2shoulder(shoulder_pos, elbow_pos, wrist_pos, arm='right')
 
-print("Updated Additional Points:\n", updated_additional_points)
+    q = mos.inverse_kinematics(p_elbowR_init, p_wristR_init, d_uar, d_lar)
+    calculated_joints.append(q)
 
+    # Calculate ergonomic scores
+    if hasattr(utils, 'calculate_upper_limb_score_with_joint_angles'):
+        ergonomic_scores_calculated.append(utils.calculate_upper_limb_score_with_joint_angles(q))
+        if i < len(optimized_joints):
+            ergonomic_scores_optimized.append(utils.calculate_upper_limb_score_with_joint_angles(optimized_joints[i]))
+
+calculated_joints = np.array(calculated_joints)
+
+# Create normalized time arrays (0-1) for both datasets
+time_calc_normalized = np.linspace(0, 1, len(calculated_joints))
+time_opt_normalized = np.linspace(0, 1, len(optimized_joints))
+
+# Plot joint angle comparison with normalized time
+plt.figure(figsize=(12, 8))
+joint_names = ['Joint 1', 'Joint 2', 'Joint 3', 'Joint 4']
+
+for i in range(4):  # Assuming 4 joints
+    plt.subplot(2, 2, i + 1)
+    plt.plot(time_calc_normalized, calculated_joints[:, i], 'b-', label='Human Joints')
+    plt.plot(time_opt_normalized, optimized_joints[:, i], 'r-', label='Optimized Joints')
+    plt.title(f'{joint_names[i]} Comparison')
+    plt.xlabel('Normalized Time (0-1)')
+    plt.ylabel('Joint Angle (rad)')
+    plt.grid(True)
+    plt.legend()
+
+plt.tight_layout()
+plt.savefig('joint_comparison_normalized.png', dpi=300)
+plt.show()
+
+# Plot all joint angles together (multiple lines on same plot)
+plt.figure(figsize=(12, 6))
+
+# Plot calculated joints
+for i in range(4):
+    plt.plot(time_calc_normalized, calculated_joints[:, i], '-',
+             label=f'Human {joint_names[i]}', alpha=0.7)
+
+# Plot optimized joints
+for i in range(4):
+    plt.plot(time_opt_normalized, optimized_joints[:, i], '--',
+             label=f'Optimized {joint_names[i]}', alpha=0.7)
+
+plt.title('All Joint Angles Comparison')
+plt.xlabel('Normalized Time (0-1)')
+plt.ylabel('Joint Angle (rad)')
+plt.grid(True)
+plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+plt.tight_layout()
+# plt.savefig('all_joints_comparison.png', dpi=300)
+plt.show()
+
+# Plot ergonomic scores if available
+if ergonomic_scores_calculated and ergonomic_scores_optimized:
+    plt.figure(figsize=(10, 6))
+
+    # Normalize time for ergonomic scores
+    time_ergo_calc = np.linspace(0, 1, len(ergonomic_scores_calculated))
+    time_ergo_opt = np.linspace(0, 1, len(ergonomic_scores_optimized))
+
+    plt.plot(time_ergo_calc, ergonomic_scores_calculated, 'b-', label='Human Ergonomic Score')
+    plt.plot(time_ergo_opt, ergonomic_scores_optimized, 'r-', label='Optimized Ergonomic Score')
+    plt.title('Ergonomic Score Comparison')
+    plt.xlabel('Normalized Time (0-1)')
+    plt.ylabel('Ergonomic Score')
+    plt.grid(True)
+    plt.legend()
+    plt.savefig('ergonomic_comparison_normalized.png', dpi=300)
+    plt.show()
+
+    # Print mean ergonomic scores
+    mean_ergo_calculated = np.mean(ergonomic_scores_calculated)
+    mean_ergo_optimized = np.mean(ergonomic_scores_optimized)
+    print(f"Mean Human Ergonomic Score: {mean_ergo_calculated:.4f}")
+    print(f"Mean Optimized Ergonomic Score: {mean_ergo_optimized:.4f}")
+    print(
+        f"Improvement: {(mean_ergo_optimized - mean_ergo_calculated):.4f} ({(mean_ergo_optimized - mean_ergo_calculated) / mean_ergo_calculated * 100:.2f}%)")
