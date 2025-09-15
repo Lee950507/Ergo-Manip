@@ -1,5 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
 import main_opt_static as mos
 import transformation as tsf
 import utils
@@ -40,6 +41,8 @@ T_optitrack2robotbase = np.linalg.inv(
 
 # Array to store the calculated joint angles from human data
 calculated_joints = []
+human_wrist_positions = []  # Store human wrist positions in shoulder frame
+optimized_wrist_positions = []  # Store optimized wrist positions from FK
 ergonomic_scores_calculated = []
 ergonomic_scores_optimized = []
 
@@ -47,7 +50,11 @@ ergonomic_scores_optimized = []
 for i in range(len(timestamps)):
     shoulder_pos = shoulder_positions[i, :3]
     elbow_pos = elbow_positions[i, :3]
-    wrist_pos =  wrist_positions[i, :3]
+    wrist_pos = wrist_positions[i, :3]
+
+    # Transform to shoulder frame
+    _, wrist_in_shoulder = trans_global2shoulder(shoulder_pos, elbow_pos, wrist_pos, arm='right')
+    human_wrist_positions.append(wrist_in_shoulder)
 
     d_ual, d_uar, d_lal, d_lar = mos.calculate_arm_dimensions(shoulder_pos, elbow_pos,
                                                               wrist_pos, shoulder_pos,
@@ -60,10 +67,28 @@ for i in range(len(timestamps)):
     # Calculate ergonomic scores
     if hasattr(utils, 'calculate_upper_limb_score_with_joint_angles'):
         ergonomic_scores_calculated.append(utils.calculate_upper_limb_score_with_joint_angles(q))
-        if i < len(optimized_joints):
-            ergonomic_scores_optimized.append(utils.calculate_upper_limb_score_with_joint_angles(optimized_joints[i]))
+
+# Calculate wrist positions from optimized joint angles using forward kinematics
+for i in range(len(optimized_joints)):
+    if i < len(timestamps):
+        shoulder_pos = T_optitrack2robotbase[:3, :3] @ shoulder_positions[i, :3] + T_optitrack2robotbase[:3, 3]
+        elbow_pos = T_optitrack2robotbase[:3, :3] @ elbow_positions[i, :3] + T_optitrack2robotbase[:3, 3]
+        wrist_pos = T_optitrack2robotbase[:3, :3] @ wrist_positions[i, :3] + T_optitrack2robotbase[:3, 3]
+        d_ual, d_uar, d_lal, d_lar = mos.calculate_arm_dimensions(shoulder_pos, elbow_pos,
+                                                                  wrist_pos, shoulder_pos,
+                                                                  elbow_pos, wrist_pos)
+
+        # Use forward kinematics to get optimized wrist position
+        _, optimized_wrist_pos = mos.forward_kinematics(optimized_joints[i], d_uar, d_lar)
+        optimized_wrist_positions.append(optimized_wrist_pos)
+
+    # Calculate ergonomic scores for optimized joints
+    if hasattr(utils, 'calculate_upper_limb_score_with_joint_angles'):
+        ergonomic_scores_optimized.append(utils.calculate_upper_limb_score_with_joint_angles(optimized_joints[i]))
 
 calculated_joints = np.array(calculated_joints)
+human_wrist_positions = np.array(human_wrist_positions)
+optimized_wrist_positions = np.array(optimized_wrist_positions)
 
 # Create normalized time arrays (0-1) for both datasets
 time_calc_normalized = np.linspace(0, 1, len(calculated_joints))
@@ -87,26 +112,48 @@ plt.tight_layout()
 plt.savefig('joint_comparison_normalized.png', dpi=300)
 plt.show()
 
-# Plot all joint angles together (multiple lines on same plot)
-plt.figure(figsize=(12, 6))
+# Plot wrist position trajectories in shoulder frame
+fig = plt.figure(figsize=(10, 8))
+ax = fig.add_subplot(111, projection='3d')
 
-# Plot calculated joints
-for i in range(4):
-    plt.plot(time_calc_normalized, calculated_joints[:, i], '-',
-             label=f'Human {joint_names[i]}', alpha=0.7)
+# Plot human wrist trajectory
+ax.plot(human_wrist_positions[:, 0],
+        human_wrist_positions[:, 1],
+        human_wrist_positions[:, 2],
+        'b-', label='Human Wrist', linewidth=2)
 
-# Plot optimized joints
-for i in range(4):
-    plt.plot(time_opt_normalized, optimized_joints[:, i], '--',
-             label=f'Optimized {joint_names[i]}', alpha=0.7)
+# Plot optimized wrist trajectory
+if len(optimized_wrist_positions) > 0:
+    ax.plot(optimized_wrist_positions[:, 0],
+            optimized_wrist_positions[:, 1],
+            optimized_wrist_positions[:, 2],
+            'r-', label='Optimized Wrist', linewidth=2)
 
-plt.title('All Joint Angles Comparison')
-plt.xlabel('Normalized Time (0-1)')
-plt.ylabel('Joint Angle (rad)')
-plt.grid(True)
-plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-plt.tight_layout()
-# plt.savefig('all_joints_comparison.png', dpi=300)
+# Set labels and legend
+ax.set_xlabel('X Position (m)')
+ax.set_ylabel('Y Position (m)')
+ax.set_zlabel('Z Position (m)')
+ax.set_title('Wrist Position Trajectories in Shoulder Frame')
+ax.legend()
+
+# Set equal aspect ratio for better visualization
+max_range = np.array([
+    np.max([human_wrist_positions[:, 0].max(), optimized_wrist_positions[:, 0].max()]) -
+    np.min([human_wrist_positions[:, 0].min(), optimized_wrist_positions[:, 0].min()]),
+    np.max([human_wrist_positions[:, 1].max(), optimized_wrist_positions[:, 1].max()]) -
+    np.min([human_wrist_positions[:, 1].min(), optimized_wrist_positions[:, 1].min()]),
+    np.max([human_wrist_positions[:, 2].max(), optimized_wrist_positions[:, 2].max()]) -
+    np.min([human_wrist_positions[:, 2].min(), optimized_wrist_positions[:, 2].min()])
+]).max() / 2.0
+
+mid_x = (human_wrist_positions[:, 0].mean() + optimized_wrist_positions[:, 0].mean()) / 2
+mid_y = (human_wrist_positions[:, 1].mean() + optimized_wrist_positions[:, 1].mean()) / 2
+mid_z = (human_wrist_positions[:, 2].mean() + optimized_wrist_positions[:, 2].mean()) / 2
+ax.set_xlim(mid_x - max_range, mid_x + max_range)
+ax.set_ylim(mid_y - max_range, mid_y + max_range)
+ax.set_zlim(mid_z - max_range, mid_z + max_range)
+
+plt.savefig('wrist_trajectory_comparison.png', dpi=300)
 plt.show()
 
 # Plot ergonomic scores if available
