@@ -287,7 +287,7 @@ def main():
     optimal_q = np.array([0, 0, 0, -math.pi / 6])
 
     # 定义当前关节角度配置（初始值）
-    current_q = np.array([1.2, 0.3, 1.1, -1.5])
+    current_q = np.array([1.2, 1.3, -0.5, 1.0])
 
     # 定义手臂尺寸参数
     d_uar = np.array([0, 0, -0.3])  # Upper arm vector (shoulder to elbow)
@@ -326,7 +326,7 @@ def main():
 
     # 执行CSEF算法
     print("执行CSEF算法优化轨迹...")
-    num_iterations = 40  # 迭代次数
+    num_iterations = 50  # 迭代次数
     trajectory_hand, trajectory_elbow, joint_history, score_history = run_iterations(num_iterations)
 
     print("算法执行完毕!")

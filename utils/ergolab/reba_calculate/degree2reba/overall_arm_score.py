@@ -62,6 +62,6 @@ def calculate_upper_limb_score_with_joint_angles(q):
     shoulder_score += 4.5 * abs(shoulder_flextion) / np.pi
     shoulder_score += 2 * abs(shoulder_rotation) / np.pi
     elbow_score = 0
-    elbow_score += 7 * abs(elbow_flextion + np.pi / 6) / np.pi
+    elbow_score += 7 * abs(elbow_flextion + np.pi / 4) / np.pi
 
     return shoulder_score + elbow_score

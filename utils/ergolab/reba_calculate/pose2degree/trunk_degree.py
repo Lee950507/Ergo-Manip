@@ -1,7 +1,7 @@
 import numpy as np
 import math
 import utils
-import transformations as tf
+# import transformations as tf
 
 
 class TrunkDegree:
