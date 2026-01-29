@@ -933,7 +933,7 @@ def main():
     ]
 
     # Create PDF to save all visualizations
-    pdf = PdfPages("path_planning_comparison.pdf")
+    pdf = PdfPages("fig/path_planning_comparison.pdf")
 
     # Create lists to store comparison metrics for all cases
     all_comparisons = []

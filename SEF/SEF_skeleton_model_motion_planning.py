@@ -298,10 +298,10 @@ def visualize_trajectory_and_sef(trajectory, d_ua, d_la, q_opt, weights, comfort
 
     axes[3].set_xlabel('Step Number')
     fig2.tight_layout()
-    fig2.savefig('joint_angles_trajectory.png', dpi=300)
+    fig2.savefig('fig/joint_angles_trajectory.png', dpi=300)
 
     plt.tight_layout()
-    fig.savefig('trajectory_and_sef.png', dpi=300)
+    fig.savefig('fig/trajectory_and_sef.png', dpi=300)
     plt.show()
 
 
@@ -328,8 +328,9 @@ def main():
     ]
 
     # Define start and goal configurations
-    q_start = np.array([math.pi / 4, math.pi / 4, 0, 0])  # Starting configuration
-    q_goal = np.array([math.pi / 2, -math.pi / 6, math.pi / 4, -math.pi / 4])  # Goal configuration
+    q_start = np.array([math.pi / 2, -math.pi / 6, math.pi / 4, -math.pi / 4])
+    q_goal = q_opt
+    # q_goal = np.array([math.pi / 4, math.pi / 4, 0, 0])
 
     print("Planning trajectory using SEF guidance...")
     trajectory = plan_trajectory_with_sef(q_start, q_goal, q_opt, weights, comfort_threshold, bounds)
