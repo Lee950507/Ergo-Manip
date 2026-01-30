@@ -399,31 +399,62 @@ def update(frame):
     ax.legend()
 
 
-def run_iterations(num_iterations):
+def run_iterations(num_iterations, task_goal_global=None):
+    """
+    参数:
+    - num_iterations: 迭代次数
+    - task_goal_global: 任务空间目标点（全局坐标系），如果为None则使用optimal_q作为目标
+    """
     global current_q, global_positions, trajectory_hand, trajectory_elbow, score_history, joint_history
 
-    # 定义CSEF场所需参数
-    q_opt = optimal_q  # 最优关节角度配置
-    weights = np.array([1.0, 1.0, 1.0, 2.0])  # 关节角度权重
-    comfort_threshold = 0.1  # 舒适阈值
-    alpha = 0.7  # 目标吸引力权重
-    beta = 0.3  # 人体工学舒适度权重
-    step_size = 0.05  # 步长
+    # CSEF场参数
+    q_opt = optimal_q  # 人体工学最优关节角度
+    weights = np.array([1.0, 1.0, 1.0, 2.0])
+    comfort_threshold = 0.1
 
-    # 用于保存结果的数组
+    # 权重参数
+    if task_goal_global is not None:
+        # 如果提供任务目标，调整权重
+        alpha = 0.6  # 任务目标吸引力权重（增加）
+        beta = 0.4  # 人体工学舒适度权重（减少）
+    else:
+        # 原始权重（指向optimal_q）
+        alpha = 0.7
+        beta = 0.3
+
+    step_size = 0.05
+
     trajectory = []
     q_current = current_q.copy()
-    q_goal = optimal_q.copy()  # 目标关节角度配置
 
     print("Planning trajectory using CSEF guidance...")
+    if task_goal_global is not None:
+        # 将任务目标转换到肩部坐标系
+        task_goal_shoulder = trans_global2shoulder(shoulder, shoulder, task_goal_global, arm='right')[1]
+        print(f"Task goal (global): {task_goal_global}")
+        print(f"Task goal (shoulder frame): {task_goal_shoulder}")
 
-    # 计算SEF值 (Signed Ergonomics Field)
+    # 计算雅可比矩阵（数值微分）
+    def compute_jacobian(q, delta=1e-6):
+        """计算手腕位置相对于关节角度的雅可比矩阵"""
+        J = np.zeros((3, 4))  # 3D位置 × 4个关节
+        _, hand_current = mos.forward_kinematics(q, d_uar, d_lar)
+
+        for i in range(4):
+            q_perturb = q.copy()
+            q_perturb[i] += delta
+            _, hand_perturb = mos.forward_kinematics(q_perturb, d_uar, d_lar)
+            J[:, i] = (hand_perturb - hand_current) / delta
+
+        return J
+
+    # 计算SEF值
     def calculate_sef(q, q_opt, weights, comfort_threshold):
         ergo_score = utils.calculate_upper_limb_score_with_joint_angles(q)
         score_history.append(ergo_score)
         return ergo_score - comfort_threshold
 
-    # 计算SEF梯度 (方向指向不舒适度增加的方向)
+    # 计算SEF梯度
     def calculate_sef_gradient(q, q_opt, weights, comfort_threshold, delta=1e-6):
         grad = np.zeros_like(q)
         sef_q = calculate_sef(q, q_opt, weights, comfort_threshold)
@@ -443,118 +474,152 @@ def run_iterations(num_iterations):
             q_limited[i] = max(bounds[i][0], min(bounds[i][1], q[i]))
         return q_limited
 
-    # 添加初始位置到轨迹
     trajectory.append(q_current)
 
-    # 主循环：使用CSEF指导的梯度下降
+    # 主循环
     for step in range(num_iterations):
-        # 计算指向目标的向量
-        goal_direction = q_goal - q_current
-        goal_distance = np.linalg.norm(goal_direction)
+        # 1. 计算当前手腕位置（肩部坐标系）
+        _, hand_current_shoulder = mos.forward_kinematics(q_current, d_uar, d_lar)
+        hand_current_global = trans_shoulder2global(hand_current_shoulder, shoulder, arm='right')
 
-        # 如果足够接近目标，结束轨迹
-        if goal_distance < 0.05:
-            trajectory.append(q_goal)
-            break
+        # 2. 计算目标方向（在关节空间）
+        if task_goal_global is not None:
+            # 使用任务空间目标
+            task_error_shoulder = task_goal_shoulder - hand_current_shoulder  # 肩部坐标系下的误差
+            task_distance = np.linalg.norm(task_error_shoulder)
+
+            # 提前终止判断
+            if task_distance < 0.02:  # 2cm阈值
+                print(f"Reached task goal at iteration {step}")
+                trajectory.append(q_current)
+                break
+
+            # 计算雅可比矩阵
+            J = compute_jacobian(q_current)
+
+            # 使用伪逆将任务空间误差映射到关节空间
+            # J^+ = J^T(JJ^T)^{-1} 或使用numpy的pinv
+            try:
+                J_pinv = np.linalg.pinv(J)
+                goal_direction = J_pinv @ task_error_shoulder  # 关节空间的目标方向
+            except np.linalg.LinAlgError:
+                # 奇异情况，使用转置近似
+                goal_direction = J.T @ task_error_shoulder
+
+            goal_distance = np.linalg.norm(goal_direction)
+
+            print(f"Step {step}: Task distance = {task_distance:.4f}m, Joint space distance = {goal_distance:.4f}")
+
+        else:
+            # 使用关节空间目标（原始方法）
+            q_goal = optimal_q
+            goal_direction = q_goal - q_current
+            goal_distance = np.linalg.norm(goal_direction)
+
+            if goal_distance < 0.05:
+                trajectory.append(q_goal)
+                break
 
         # 归一化目标方向
-        if goal_distance > 0:
+        if goal_distance > 1e-6:
             goal_direction = goal_direction / goal_distance
+        else:
+            goal_direction = np.zeros(4)
 
-        # 获取SEF梯度（不舒适度增加的方向）
+        # 3. 获取SEF梯度（不舒适度增加的方向）
         sef_gradient = calculate_sef_gradient(q_current, q_opt, weights, comfort_threshold)
         sef_gradient_norm = np.linalg.norm(sef_gradient)
 
-        # 归一化SEF梯度（如果非零）
-        if sef_gradient_norm > 0:
+        if sef_gradient_norm > 1e-6:
             sef_gradient = sef_gradient / sef_gradient_norm
+        else:
+            sef_gradient = np.zeros(4)
 
-        # 组合目标方向和负SEF梯度（朝向更舒适的方向）
+        # 4. 组合两个方向（都在关节空间）
         combined_direction = alpha * goal_direction - beta * sef_gradient
         combined_norm = np.linalg.norm(combined_direction)
 
-        if combined_norm > 0:
-            # 归一化并移动一步
+        if combined_norm > 1e-6:
             combined_direction = combined_direction / combined_norm
             q_next = q_current + step_size * combined_direction
         else:
             # 如果方向相互抵消，优先考虑目标方向
             q_next = q_current + step_size * goal_direction
 
-        # 确保关节角度在限制范围内
+        # 5. 确保关节角度在限制范围内
         q_next = enforce_joint_limits(q_next, joint_angle_bounds)
 
-        # 使用前向运动学计算新的手肘和手腕位置
+        # 6. 更新位置
         new_elbow, new_hand = mos.forward_kinematics(q_next, d_uar, d_lar)
-        new_hand = trans_shoulder2global(new_hand, shoulder, arm='right')
-        new_elbow = trans_shoulder2global(new_elbow, shoulder, arm='right')
+        new_hand_global = trans_shoulder2global(new_hand, shoulder, arm='right')
+        new_elbow_global = trans_shoulder2global(new_elbow, shoulder, arm='right')
 
-        # 添加到轨迹并更新当前位置
         trajectory.append(q_next)
         q_current = q_next
         joint_history.append(q_next.copy())
 
-        # 更新全局位置数组
-        global_positions[4] = new_elbow
-        global_positions[5] = new_hand
+        global_positions[4] = new_elbow_global
+        global_positions[5] = new_hand_global
 
-        # 将新位置添加到手腕和肘部轨迹
-        trajectory_hand.append(new_hand.copy())
-        trajectory_elbow.append(new_elbow.copy())
+        trajectory_hand.append(new_hand_global.copy())
+        trajectory_elbow.append(new_elbow_global.copy())
 
-        # 自适应步长：接近目标时减小
-        step_size = min(0.05, goal_distance * 0.2)
+        # 7. 自适应步长
+        if task_goal_global is not None:
+            step_size = min(0.05, task_distance * 0.3)  # 根据任务距离调整
+        else:
+            step_size = min(0.05, goal_distance * 0.2)
 
-        print(f"Iteration {step + 1}/{num_iterations} completed. Current score: {score_history[-1]:.4f}")
+        print(f"Iteration {step + 1}/{num_iterations} - Score: {score_history[-1]:.4f}")
 
-    # 设置最终配置为当前配置
     current_q = q_current
 
-    # 迭代完成后绘制最终结果
+    # 可视化最终结果
     ax.set_xlim((0.7, 2.2))
     ax.set_ylim((-0.7, 0.8))
     ax.set_zlim((0.0, 1.5))
     ax.view_init(elev=30, azim=-30)
 
-    # 获取最终位置
     new_elbow = global_positions[4]
     new_hand = global_positions[5]
 
-    # 绘制肩部、肘部、手腕点（用不同颜色标记），以及轨迹
     ax.scatter(shoulder[0], shoulder[1], shoulder[2], c='black', s=50, label='Shoulder')
     ax.scatter(new_elbow[0], new_elbow[1], new_elbow[2], c='blue', s=50, label='Elbow')
-    ax.scatter(new_hand[0], new_hand[1], new_hand[2], c='green', s=50, label='Hand')
+    ax.scatter(new_hand[0], new_hand[1], new_hand[2], c='green', s=50, label='Hand (final)')
 
-    # 绘制轨迹（手腕轨迹）
+    # 如果有任务目标，标注出来
+    if task_goal_global is not None:
+        ax.scatter(task_goal_global[0], task_goal_global[1], task_goal_global[2],
+                   c='red', s=100, marker='*', label='Task Goal')
+
     traj = np.array(trajectory_hand)
-    ax.plot(traj[:, 0], traj[:, 1], traj[:, 2], c='green', linestyle='--')
+    ax.plot(traj[:, 0], traj[:, 1], traj[:, 2], c='green', linestyle='--', linewidth=2, label='Hand trajectory')
 
-    # 绘制从肩部到手腕的连线，模拟手臂
     ax.plot([shoulder[0], new_elbow[0], new_hand[0]],
             [shoulder[1], new_elbow[1], new_hand[1]],
             [shoulder[2], new_elbow[2], new_hand[2]], c='red', linewidth=2)
 
-    # 绘制参考最优位置（optimal_position，供对比）
     ax.scatter(optimal_position[0], optimal_position[1], optimal_position[2],
-               c='magenta', s=50, label='Optimal Position')
+               c='magenta', s=50, label='Ergo Optimal')
 
     utils.plot_skeleton(ax, global_positions, skeleton_parent_indices, color='black')
 
-    # 设定坐标轴标签与标题
     ax.set_xlabel('X Position')
     ax.set_ylabel('Y Position')
     ax.set_zlabel('Z Position')
-    ax.set_title(f'Final Result after {num_iterations} Iterations (CSEF Method)')
+
+    title_suffix = 'with Task Goal' if task_goal_global is not None else 'with Optimal Joint Config'
+    ax.set_title(f'Final Result {title_suffix}')
     ax.legend()
 
     plt.show()
 
-    # 绘制分数历史趋势图
+    # 绘制分数历史
     plt.figure(figsize=(10, 6))
-    plt.plot(range(1, len(score_history) + 1), score_history)
+    plt.plot(range(1, len(score_history) + 1), score_history, linewidth=2)
     plt.xlabel('Iteration')
     plt.ylabel('Ergonomic Score')
-    plt.title('Ergonomic Score History (CSEF Method)')
+    plt.title('Ergonomic Score History')
     plt.grid(True)
     plt.show()
 
@@ -697,9 +762,25 @@ if __name__ == '__main__':
     # anim.save("/home/ubuntu/Ergo-Manip/vector_field/figs/animation_left_arm_straight.gif", writer=PillowWriter(fps=2))
     # plt.show()
 
-    goal_pos = np.array([0, 0, 0])
+    task_goal_global = hand_current + np.array([0.0, 0.0, -0.1])  # 前方30cm，上方20cm
 
-    trajectory_hand, trajectory_elbow, joint_history, score_history = run_iterations(num_iterations)
+    # 方式2: 绝对坐标（取消注释使用）
+    # task_goal_global = np.array([1.5, 0.0, 1.2])
+
+    # 方式3: 不使用任务目标，使用optimal_q（取消注释使用）
+    # task_goal_global = None
+
+    print(f"\n{'=' * 60}")
+    print(f"Starting trajectory planning")
+    if task_goal_global is not None:
+        print(f"Task goal (global): {task_goal_global}")
+    else:
+        print(f"Using ergonomic optimal joint configuration")
+    print(f"{'=' * 60}\n")
+
+    # 运行轨迹规划
+    trajectory_hand, trajectory_elbow, joint_history, score_history = \
+        run_iterations(num_iterations, task_goal_global=task_goal_global)
 
     # 在这里添加你想在迭代完成后执行的代码
     print("Iterations completed. Continuing with next steps...")
