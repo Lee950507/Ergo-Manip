@@ -15,6 +15,7 @@ from matplotlib.colors import Normalize
 from matplotlib.cm import ScalarMappable, get_cmap
 from scipy.interpolate import CubicSpline
 from scipy.spatial import KDTree
+from scipy.ndimage import gaussian_filter1d
 
 import sys
 import os
@@ -26,6 +27,21 @@ import tkinter as tk
 from tkinter import messagebox
 
 from utils import plot_skeleton
+
+
+def plot_right_upper_limb_skeleton(ax, global_positions, color='gray', linewidth=3):
+    """
+    Plot only the right upper limb skeleton (shoulder -> elbow -> wrist).
+    global_positions[3]=shoulder, [4]=elbow, [5]=wrist.
+    """
+    shoulder = global_positions[3]
+    elbow = global_positions[4]
+    wrist = global_positions[5]
+    ax.plot([shoulder[0], elbow[0]], [shoulder[1], elbow[1]], [shoulder[2], elbow[2]],
+            color=color, linewidth=linewidth, alpha=0.9)
+    ax.plot([elbow[0], wrist[0]], [elbow[1], wrist[1]], [elbow[2], wrist[2]],
+            color=color, linewidth=linewidth, alpha=0.9)
+
 
 # Get ROS workspace path
 workspace_path = '/home/clover/catkin_ws'
@@ -120,6 +136,37 @@ def smooth_trajectory(waypoints, smoothing_factor=0.8, iterations=3):
         smoothed[0] = original_start
         smoothed[-1] = original_end
 
+    return smoothed
+
+
+def smooth_trajectory_spline(waypoints, num_points=None):
+    """
+    Smooth trajectory by fitting CubicSpline per dimension and resampling.
+    Produces C2-continuous trajectory. waypoints: [N, d] (joint d=4 or task d=3).
+    """
+    waypoints = np.asarray(waypoints)
+    if len(waypoints) <= 2:
+        return waypoints
+    n, d = waypoints.shape
+    if num_points is None:
+        num_points = n
+    t_orig = np.linspace(0, 1, n)
+    t_new = np.linspace(0, 1, num_points)
+    smoothed = np.zeros((num_points, d))
+    for j in range(d):
+        cs = CubicSpline(t_orig, waypoints[:, j])
+        smoothed[:, j] = cs(t_new)
+    return smoothed
+
+
+def smooth_trajectory_gaussian(waypoints, sigma=1.0, axis=0):
+    """Smooth trajectory with 1D Gaussian filter along axis (default: along time)."""
+    waypoints = np.asarray(waypoints)
+    if len(waypoints) <= 2 or sigma <= 0:
+        return waypoints
+    smoothed = np.zeros_like(waypoints)
+    for j in range(waypoints.shape[1]):
+        smoothed[:, j] = gaussian_filter1d(waypoints[:, j], sigma=sigma, mode='nearest')
     return smoothed
 
 
@@ -602,373 +649,367 @@ def generate_reference_trajectory(start_pos, goal_pos, num_points=50, trajectory
     return trajectory
 
 
-def run_iterations_with_sdf_guidance(num_iterations, task_goal_global, reference_trajectory):
+def generate_shoulder_reference_trajectory(shoulder_center, num_points, amplitude_x=0.02, amplitude_y=0.02,
+                                          amplitude_z=0.01, trajectory_type='sinusoidal'):
     """
-    SDF-guided trajectory planning with Adaptive Weighting Strategy
+    Generate small-range reference trajectory for shoulder to simulate real body motion.
 
-    Key Innovation:
-    - Large SDF distance → Follow gradient (pull toward trajectory)
-    - Small SDF distance → Follow tangent (smooth flow along trajectory)
+    Parameters:
+    - shoulder_center: center position of shoulder [3,] (e.g. initial shoulder position)
+    - num_points: number of trajectory points (typically num_iterations)
+    - amplitude_x, amplitude_y, amplitude_z: half-range of motion in each axis (meters)
+    - trajectory_type: 'sinusoidal' (smooth periodic), 'circular' (xy circle), 'ellipse', 'straight' (linear segment)
+
+    Returns:
+    - trajectory: shoulder positions [N, 3]
+    """
+    shoulder_center = np.asarray(shoulder_center).ravel()[:3]
+    t = np.linspace(0, 1, num_points)
+
+    if trajectory_type == 'straight':
+        # Straight line: from (center - amplitude) to (center + amplitude) in 3D
+        start_pos = shoulder_center
+        end_pos = shoulder_center + np.array([amplitude_x, amplitude_y, amplitude_z])
+        trajectory = np.outer(1 - t, start_pos) + np.outer(t, end_pos)
+
+    elif trajectory_type == 'sinusoidal':
+        # Smooth sinusoidal motion in each axis (different phases to avoid pure line)
+        dx = amplitude_x * np.sin(2 * np.pi * t)
+        dy = amplitude_y * np.sin(2 * np.pi * t + 0.7)
+        dz = amplitude_z * np.sin(2 * np.pi * t + 1.3)
+        trajectory = shoulder_center + np.column_stack([dx, dy, dz])
+
+    elif trajectory_type == 'circular':
+        # Circular motion in XY plane, slight Z variation
+        dx = amplitude_x * np.cos(2 * np.pi * t)
+        dy = amplitude_y * np.sin(2 * np.pi * t)
+        dz = amplitude_z * np.sin(2 * np.pi * t * 0.5)
+        trajectory = shoulder_center + np.column_stack([dx, dy, dz])
+
+    elif trajectory_type == 'ellipse':
+        # Elliptic motion
+        dx = amplitude_x * np.cos(2 * np.pi * t)
+        dy = amplitude_y * 0.6 * np.sin(2 * np.pi * t)
+        dz = amplitude_z * np.sin(2 * np.pi * t)
+        trajectory = shoulder_center + np.column_stack([dx, dy, dz])
+
+    else:
+        raise ValueError(f"Unknown shoulder trajectory type: {trajectory_type}. "
+                        f"Use one of: sinusoidal, circular, ellipse, straight")
+
+    return np.array(trajectory)
+
+
+def ik_target_point(hand_target_global, shoulder, q_init, d_uar, d_lar, joint_angle_bounds,
+                    maxiter=100, ftol=1e-8):
+    """
+    Simple IK: find q such that wrist (endpoint) reaches hand_target_global in task space.
+    Returns (q, position_error).
+    """
+    hand_target_relative = hand_target_global - shoulder
+    hand_target_shoulder = np.array([
+        -hand_target_relative[1],
+        -hand_target_relative[0],
+        hand_target_relative[2]
+    ])
+
+    def objective(q):
+        _, hand_shoulder = mos.forward_kinematics(q, d_uar, d_lar)
+        return np.sum((hand_shoulder - hand_target_shoulder) ** 2)
+
+    result = minimize(
+        objective,
+        q_init,
+        method='SLSQP',
+        bounds=joint_angle_bounds,
+        options={'maxiter': maxiter, 'ftol': ftol}
+    )
+    q = result.x
+    _, hand_shoulder = mos.forward_kinematics(q, d_uar, d_lar)
+    hand_global = trans_shoulder2global(hand_shoulder, shoulder, arm='right')
+    pos_error = np.linalg.norm(hand_global - hand_target_global)
+    return q, pos_error
+
+
+def compute_ergonomic_vector_task_space(endpoint_global, shoulder, q_current, d_uar, d_lar,
+                                        joint_angle_bounds, neighbor_radius=0.02, n_samples=27):
+    """
+    In task space, define a neighbor range around current endpoint; find the point in this
+    range that has the lowest ergo score (by IK then ergo(q)); return the direction from
+    endpoint to that point as the ergonomic vector.
+
+    Returns:
+    - ergo_direction: [3,] normalized vector pointing toward lowest-ergo point in neighborhood,
+      or zero vector if no valid point found.
+    """
+    # Sample points in a ball around endpoint (grid on cube then filter to ball, or random)
+    samples = []
+    for _ in range(n_samples):
+        u = np.random.randn(3)
+        u = u / (np.linalg.norm(u) + 1e-8)
+        r = neighbor_radius * (np.random.rand() ** (1 / 3))
+        p = endpoint_global + r * u
+        samples.append(p)
+
+    best_score = np.inf
+    best_point = None
+    for p_global in samples:
+        q, pos_err = ik_target_point(p_global, shoulder, q_current, d_uar, d_lar,
+                                     joint_angle_bounds, maxiter=50, ftol=1e-6)
+        if pos_err > 0.02:
+            continue
+        score = utils.calculate_upper_limb_score_with_joint_angles(q)
+        if score < best_score:
+            best_score = score
+            best_point = p_global.copy()
+
+    if best_point is None:
+        return np.zeros(3)
+    delta = best_point - endpoint_global
+    norm = np.linalg.norm(delta)
+    if norm < 1e-6:
+        return np.zeros(3)
+    return delta / norm
+
+
+def run_iterations_task_space_direct(num_iterations, task_goal_global, reference_trajectory=None,
+                                    shoulder_trajectory=None, w_goal=0.33, w_ref=0.33, w_ergo=0.34,
+                                    method_name='Unified', goal_threshold=0.01, step_size=0.04,
+                                    neighbor_radius=0.02, n_ergo_samples=27,
+                                    use_moving_average=True, moving_avg_window=5):
+    """
+    Unified task-space direct motion planning. Plan trajectory by moving the skeleton endpoint
+    (wrist) in task space. At each step:
+    1. Goal vector = (task_goal - endpoint), normalized.
+    2. Ref vector = (closest_point_on_reference_trajectory - endpoint), normalized (if reference given).
+    3. Ergo vector = direction toward the point in a neighbor range that has lowest ergo score.
+    4. Combined direction = w_goal*goal + w_ref*ref + w_ergo*ergo, normalized.
+    5. Next waypoint = endpoint + step_size * combined_direction.
+    6. IK(next_waypoint) -> q_next; update skeleton and trajectories.
+
+    Returns:
+    - trajectory: list of q
+    - trajectory_hand: array [N, 3] wrist positions in global frame
+    - score_history: list of ergo scores
+    - joint_history: list of q
+    - sdf_values: list of distances to reference trajectory (if reference given)
+    - weights_history: list of dict with w_goal, w_ref, w_ergo (for logging)
     """
     global current_q, global_positions, shoulder, d_uar, d_lar, joint_angle_bounds
 
-    print("\n" + "=" * 70)
-    print("Starting SDF-guided trajectory planning with Adaptive Weights")
-    print("=" * 70)
+    ref_traj = np.array(reference_trajectory) if reference_trajectory is not None else None
+    ref_kdtree = KDTree(ref_traj) if ref_traj is not None else None
 
-    # Initialize SDF field
-    sdf_field = TrajectorySDFField(reference_trajectory, sigma=0.05)
-
-    # ========== ADAPTIVE WEIGHT PARAMETERS ==========
-    # Define SDF distance thresholds for adaptive behavior
-    sdf_near_threshold = 0.01  # 3cm - considered "near" the trajectory
-    sdf_far_threshold = 0.03  # 10cm - considered "far" from trajectory
-
-    # Weight ranges for adaptive interpolation
-    # When FAR (large SDF): prioritize gradient to pull back to trajectory
-    alpha_far = 0.85  # Strong gradient following
-    beta_far = 0.1  # Weak tangent following
-    gamma_far = 0.05  # Weak goal attraction
-
-    # When NEAR (small SDF): prioritize tangent for smooth flow
-    alpha_near = 0.1  # Weak gradient following
-    beta_near = 0.8  # Strong tangent following
-    gamma_near = 0.1  # Weak goal attraction
-
-    # Step size parameters
-    step_size_base = 0.05  # Base step size
-    step_size_near = 0.04  # Smaller steps when near trajectory
-    step_size_far = 0.06  # Larger steps when far from trajectory
-
-    # Smoothness parameters
-    joint_velocity_weight = 0.3
-    joint_acceleration_weight = 0.2
-    use_moving_average = True
-    moving_avg_window = 3
-
-    # Convergence threshold
-    goal_threshold = 0.01  # 10mm
-
-    # Storage
     trajectory = []
-    trajectory_hand_sdf = []
-    trajectory_elbow_sdf = []
-    score_history_sdf = []
-    joint_history_sdf = []
+    trajectory_hand = []
+    trajectory_elbow = []
+    score_history = []
+    joint_history = []
     sdf_values = []
-    adaptive_weights_history = []  # Track weight evolution
+    weights_history = []
 
-    joint_velocities = []
-    joint_accelerations = []
+    if shoulder_trajectory is not None:
+        shoulder = np.array(shoulder_trajectory[0]).copy()
+        global_positions[3] = shoulder.copy()
 
     q_current = current_q.copy()
     trajectory.append(q_current.copy())
 
-    # Initial state
-    _, hand_current_shoulder = mos.forward_kinematics(q_current, d_uar, d_lar)
-    hand_current_global = trans_shoulder2global(hand_current_shoulder, shoulder, arm='right')
-    trajectory_hand_sdf.append(hand_current_global.copy())
+    _, hand_shoulder = mos.forward_kinematics(q_current, d_uar, d_lar)
+    endpoint = trans_shoulder2global(hand_shoulder, shoulder, arm='right')
+    trajectory_hand.append(endpoint.copy())
 
-    print(f"Initial position: {hand_current_global}")
-    print(f"Target position: {task_goal_global}")
-    print(f"Initial distance: {np.linalg.norm(task_goal_global - hand_current_global):.4f} m")
-    print(f"\nAdaptive Weight Strategy:")
-    print(
-        f"  Near threshold (<{sdf_near_threshold * 1000:.0f}mm): α={alpha_near:.1f}, β={beta_near:.1f}, γ={gamma_near:.1f}")
-    print(
-        f"  Far threshold (>{sdf_far_threshold * 1000:.0f}mm): α={alpha_far:.1f}, β={beta_far:.1f}, γ={gamma_far:.1f}")
-    print(f"  Transition zone: smooth interpolation\n")
+    initial_goal_dist = np.linalg.norm(task_goal_global - endpoint)
+    print(f"[{method_name}] Task-space direct planning. Initial goal dist: {initial_goal_dist:.4f} m")
+    print(f"  Weights: goal={w_goal:.2f}, ref={w_ref:.2f}, ergo={w_ergo:.2f}\n")
 
     for step in range(num_iterations):
-        # 1. Compute current state
-        elbow_current_shoulder, hand_current_shoulder = mos.forward_kinematics(q_current, d_uar, d_lar)
-        hand_current_global = trans_shoulder2global(hand_current_shoulder, shoulder, arm='right')
-        elbow_current_global = trans_shoulder2global(elbow_current_shoulder, shoulder, arm='right')
+        if shoulder_trajectory is not None:
+            shoulder = np.array(shoulder_trajectory[min(step, len(shoulder_trajectory) - 1)]).copy()
+            global_positions[3] = shoulder.copy()
+
+        _, hand_current_shoulder = mos.forward_kinematics(q_current, d_uar, d_lar)
+        endpoint = trans_shoulder2global(hand_current_shoulder, shoulder, arm='right')
+        elbow_shoulder, _ = mos.forward_kinematics(q_current, d_uar, d_lar)
+        elbow_global = trans_shoulder2global(elbow_shoulder, shoulder, arm='right')
+        # Sync skeleton to current step's shoulder + q_current so ergo score is associated with correct pose
+        global_positions[4] = elbow_global.copy()
+        global_positions[5] = endpoint.copy()
         current_score = utils.calculate_upper_limb_score_with_joint_angles(q_current)
 
-        # Record history
-        score_history_sdf.append(current_score)
-        joint_history_sdf.append(q_current.copy())
+        score_history.append(current_score)
+        joint_history.append(q_current.copy())
 
-        # 2. Compute SDF-related quantities
-        sdf_distance, closest_point, _ = sdf_field.compute_sdf(hand_current_global)
-        sdf_gradient = sdf_field.compute_gradient(hand_current_global, delta=1e-5)
-        tangent_direction = sdf_field.compute_tangent_direction(hand_current_global)
-
-        sdf_values.append(sdf_distance)
-
-        # 3. Compute goal direction
-        goal_direction = task_goal_global - hand_current_global
-        goal_distance = np.linalg.norm(goal_direction)
-
-        # Check if reached goal
-        if goal_distance < goal_threshold:
-            print(f"Reached target at iteration {step}")
+        goal_dist = np.linalg.norm(task_goal_global - endpoint)
+        if goal_dist < goal_threshold:
+            print(f"[{method_name}] Reached goal at iteration {step}")
+            trajectory_hand.append(endpoint.copy())
+            trajectory_elbow.append(elbow_global.copy())
             break
 
-        # ========== ADAPTIVE WEIGHT COMPUTATION ==========
-        # Compute interpolation factor based on SDF distance
-        if sdf_distance <= sdf_near_threshold:
-            # NEAR: Use near weights
-            blend_factor = 0.0
-        elif sdf_distance >= sdf_far_threshold:
-            # FAR: Use far weights
-            blend_factor = 1.0
+        # 1. Goal vector (task space)
+        goal_vec = task_goal_global - endpoint
+        if np.linalg.norm(goal_vec) > 1e-8:
+            goal_vec = goal_vec / np.linalg.norm(goal_vec)
         else:
-            # TRANSITION: Smooth interpolation
-            blend_factor = (sdf_distance - sdf_near_threshold) / (sdf_far_threshold - sdf_near_threshold)
+            goal_vec = np.zeros(3)
 
-        # Interpolate weights smoothly
-        alpha_sdf = alpha_near + blend_factor * (alpha_far - alpha_near)
-        beta_tangent = beta_near + blend_factor * (beta_far - beta_near)
-        gamma_goal = gamma_near + blend_factor * (gamma_far - gamma_near)
-
-        # Adaptive step size based on SDF distance
-        step_size = step_size_near + blend_factor * (step_size_far - step_size_near)
-
-        # Store weights for analysis
-        adaptive_weights_history.append({
-            'sdf_distance': sdf_distance,
-            'alpha': alpha_sdf,
-            'beta': beta_tangent,
-            'gamma': gamma_goal,
-            'blend_factor': blend_factor,
-            'step_size': step_size
-        })
-
-        # Normalize directions
-        if np.linalg.norm(sdf_gradient) > 1e-6:
-            sdf_gradient_normalized = -sdf_gradient / np.linalg.norm(sdf_gradient)
+        # 2. Ref vector: closest point on reference trajectory (task space)
+        if reference_trajectory is not None and w_ref > 0:
+            _, closest_idx = ref_kdtree.query(endpoint, k=1)
+            idx = np.atleast_1d(closest_idx)[0]
+            closest_point = ref_traj[idx]
+            ref_vec = closest_point - endpoint
+            sdf_dist = np.linalg.norm(ref_vec)
+            sdf_values.append(sdf_dist)
+            if np.linalg.norm(ref_vec) > 1e-8:
+                ref_vec = ref_vec / np.linalg.norm(ref_vec)
+            else:
+                ref_vec = np.zeros(3)
         else:
-            sdf_gradient_normalized = np.zeros(3)
+            ref_vec = np.zeros(3)
+            sdf_values.append(0.0)
 
-        if np.linalg.norm(tangent_direction) > 1e-6:
-            tangent_normalized = tangent_direction / np.linalg.norm(tangent_direction)
+        # 3. Ergonomic vector: direction toward lowest-ergo point in neighborhood (task space)
+        if w_ergo > 0:
+            ergo_vec = compute_ergonomic_vector_task_space(
+                endpoint, shoulder, q_current, d_uar, d_lar, joint_angle_bounds,
+                neighbor_radius=neighbor_radius, n_samples=n_ergo_samples
+            )
         else:
-            tangent_normalized = np.zeros(3)
+            ergo_vec = np.zeros(3)
 
-        if goal_distance > 1e-6:
-            goal_direction_normalized = goal_direction / goal_distance
+        # 4. Combined direction (task space)
+        combined = w_goal * goal_vec + w_ref * ref_vec + w_ergo * ergo_vec
+        combined_norm = np.linalg.norm(combined)
+        if combined_norm > 1e-8:
+            combined = combined / combined_norm
         else:
-            goal_direction_normalized = np.zeros(3)
+            combined = goal_vec
 
-        # 4. Combine directions with adaptive weights
-        combined_direction_task = (alpha_sdf * sdf_gradient_normalized +
-                                   beta_tangent * tangent_normalized +
-                                   gamma_goal * goal_direction_normalized)
+        weights_history.append({'w_goal': w_goal, 'w_ref': w_ref, 'w_ergo': w_ergo})
 
-        combined_norm = np.linalg.norm(combined_direction_task)
-        if combined_norm > 1e-6:
-            combined_direction_task_normalized = combined_direction_task / combined_norm
-        else:
-            combined_direction_task_normalized = goal_direction_normalized
+        # 5. Next waypoint in task space
+        adaptive_step = min(step_size, goal_dist * 0.4)
+        next_waypoint = endpoint + adaptive_step * combined
 
-        # 5. Adaptive step size with goal proximity consideration
-        progress_ratio = 1.0 - (goal_distance / np.linalg.norm(task_goal_global - trajectory_hand_sdf[0]))
-        adaptive_step = step_size * (1.0 - 0.4 * progress_ratio)
-        adaptive_step = min(adaptive_step, goal_distance * 0.35)
+        # 6. IK to get q_next
+        q_next, ik_error = ik_target_point(next_waypoint, shoulder, q_current, d_uar, d_lar,
+                                           joint_angle_bounds, maxiter=120, ftol=1e-8)
 
-        # 6. Task space displacement
-        delta_hand_global = adaptive_step * combined_direction_task_normalized
-        hand_target_global = hand_current_global + delta_hand_global
-
-        # 7. Convert to shoulder frame for IK
-        hand_target_relative = hand_target_global - shoulder
-        hand_target_shoulder = np.array([
-            -hand_target_relative[1],
-            -hand_target_relative[0],
-            hand_target_relative[2]
-        ])
-
-        # 8. Solve IK with smoothness constraints
-        def ik_objective(q):
-            _, hand_shoulder = mos.forward_kinematics(q, d_uar, d_lar)
-            position_error = np.linalg.norm(hand_shoulder - hand_target_shoulder)
-
-            if len(trajectory) > 0:
-                q_prev = trajectory[-1]
-                joint_velocity = q - q_prev
-                velocity_penalty = joint_velocity_weight * np.sum(joint_velocity ** 2)
-
-                if len(trajectory) > 1:
-                    q_prev_prev = trajectory[-2]
-                    prev_velocity = q_prev - q_prev_prev
-                    acceleration = joint_velocity - prev_velocity
-                    acceleration_penalty = joint_acceleration_weight * np.sum(acceleration ** 2)
-                else:
-                    acceleration_penalty = 0.0
-
-                return position_error + velocity_penalty + acceleration_penalty
-
-            return position_error
-
-        result = minimize(
-            ik_objective,
-            q_current,
-            method='SLSQP',
-            bounds=joint_angle_bounds,
-            options={'maxiter': 150, 'ftol': 1e-9}
-        )
-
-        q_next = result.x
-
-        # 9. Apply moving average filter
         if use_moving_average and len(trajectory) >= moving_avg_window:
             recent_qs = np.array(trajectory[-(moving_avg_window - 1):] + [q_next])
             q_smoothed = np.mean(recent_qs, axis=0)
-
-            _, hand_check_shoulder = mos.forward_kinematics(q_smoothed, d_uar, d_lar)
-            check_error = np.linalg.norm(hand_check_shoulder - hand_target_shoulder)
-
-            if check_error < 0.02:
+            _, hand_smoothed = mos.forward_kinematics(q_smoothed, d_uar, d_lar)
+            hand_smoothed_global = trans_shoulder2global(hand_smoothed, shoulder, arm='right')
+            if np.linalg.norm(hand_smoothed_global - next_waypoint) < 0.03:
                 q_next = q_smoothed
 
-        # 10. Update trajectory
         trajectory.append(q_next.copy())
-
-        new_elbow_shoulder, new_hand_shoulder = mos.forward_kinematics(q_next, d_uar, d_lar)
+        _, new_hand_shoulder = mos.forward_kinematics(q_next, d_uar, d_lar)
+        new_elbow_shoulder, _ = mos.forward_kinematics(q_next, d_uar, d_lar)
         new_hand_global = trans_shoulder2global(new_hand_shoulder, shoulder, arm='right')
         new_elbow_global = trans_shoulder2global(new_elbow_shoulder, shoulder, arm='right')
+        trajectory_hand.append(new_hand_global.copy())
+        trajectory_elbow.append(new_elbow_global.copy())
 
-        trajectory_hand_sdf.append(new_hand_global.copy())
-        trajectory_elbow_sdf.append(new_elbow_global.copy())
+        global_positions[4] = new_elbow_global
+        global_positions[5] = new_hand_global
 
-        # Track velocities and accelerations
-        if len(trajectory) > 1:
-            velocity = q_next - trajectory[-2]
-            joint_velocities.append(np.linalg.norm(velocity))
-
-            if len(trajectory) > 2:
-                prev_velocity = trajectory[-2] - trajectory[-3]
-                acceleration = velocity - prev_velocity
-                joint_accelerations.append(np.linalg.norm(acceleration))
-
-        # 11. Print progress with adaptive weights
         if step % 5 == 0 or step == num_iterations - 1:
-            avg_velocity = np.mean(joint_velocities[-5:]) if joint_velocities else 0
-            print(f"Iter {step:3d}: Score={current_score:.4f}, "
-                  f"SDF={sdf_distance * 1000:.1f}mm, "
-                  f"Goal={goal_distance * 1000:.1f}mm, "
-                  f"α={alpha_sdf:.2f}, β={beta_tangent:.2f}, "
-                  f"Step={adaptive_step:.3f}")
+            print(f"[{method_name}] Iter {step:3d}: Score={current_score:.4f}, "
+                  f"Goal={goal_dist*1000:.1f}mm, IK_err={ik_error*1000:.2f}mm")
 
-        # 12. Update current state
         q_current = q_next.copy()
 
-    # ========== POST-PROCESSING: MULTI-STAGE SMOOTHING ==========
-    print("\nApplying multi-stage trajectory smoothing...")
-
-    # Stage 1: Joint space smoothing
-    trajectory_array = np.array(trajectory)
-    if len(trajectory_array) > 5:
-        print("  Stage 1: Joint space smoothing...")
-        trajectory_smoothed = smooth_trajectory(
-            trajectory_array,
-            smoothing_factor=0.4,
-            iterations=3
-        )
-        trajectory = trajectory_smoothed.tolist()
-
-        # Recompute task space from smoothed joint space
-        trajectory_hand_sdf = []
-        for q in trajectory_smoothed:
-            _, hand_shoulder = mos.forward_kinematics(q, d_uar, d_lar)
-            hand_global = trans_shoulder2global(hand_shoulder, shoulder, arm='right')
-            trajectory_hand_sdf.append(hand_global)
-
-    # Stage 2: Light task space smoothing
-    trajectory_hand_sdf_array = np.array(trajectory_hand_sdf)
-    if len(trajectory_hand_sdf_array) > 5:
-        print("  Stage 2: Task space smoothing...")
-        trajectory_hand_sdf_smoothed = smooth_trajectory(
-            trajectory_hand_sdf_array,
-            smoothing_factor=0.3,
-            iterations=2
-        )
-        trajectory_hand_sdf = trajectory_hand_sdf_smoothed
-
-    # Final verification
-    q_final = trajectory[-1] if isinstance(trajectory[-1], np.ndarray) else np.array(trajectory[-1])
-    _, final_hand_shoulder = mos.forward_kinematics(q_final, d_uar, d_lar)
-    final_hand_global = trans_shoulder2global(final_hand_shoulder, shoulder, arm='right')
+    current_q = q_current.copy()
+    traj_hand_arr = np.array(trajectory_hand)
+    # Multi-stage smoothing for smoother trajectories
+    if len(trajectory) > 5:
+        traj_arr = np.array(trajectory)
+        q_first_orig = traj_arr[0].copy()
+        q_last_orig = traj_arr[-1].copy()
+        # Stage 1: iterative averaging (preserves start/end)
+        traj_arr = smooth_trajectory(traj_arr, smoothing_factor=0.52, iterations=4)
+        # Stage 2: Gaussian filter along time (reduces jerk)
+        traj_arr = smooth_trajectory_gaussian(traj_arr, sigma=1.2)
+        # Stage 3: spline resampling for C2 continuity (optional, keeps same N)
+        traj_arr = smooth_trajectory_spline(traj_arr, num_points=len(traj_arr))
+        # Restore exact first/last joint so all three methods have identical start/end positions
+        traj_arr[0] = q_first_orig
+        traj_arr[-1] = q_last_orig
+        trajectory = traj_arr.tolist()
+        # Rebuild hand trajectory using per-step shoulder (fixes Y-direction start mismatch)
+        n_pts = len(trajectory)
+        if shoulder_trajectory is not None:
+            sh_traj = np.array(shoulder_trajectory)
+            n_sh = len(sh_traj)
+            # Map trajectory index i to shoulder index (same relative progress along path)
+            traj_hand_arr = np.array([
+                trans_shoulder2global(mos.forward_kinematics(trajectory[i], d_uar, d_lar)[1],
+                                      sh_traj[min(int(i * (n_sh - 1) / max(n_pts - 1, 1)), n_sh - 1)], arm='right')
+                for i in range(n_pts)
+            ])
+        else:
+            sh = shoulder.copy()
+            traj_hand_arr = np.array([
+                trans_shoulder2global(mos.forward_kinematics(q, d_uar, d_lar)[1], sh, arm='right')
+                for q in trajectory
+            ])
+    q_final = np.array(trajectory[-1])
     final_score = utils.calculate_upper_limb_score_with_joint_angles(q_final)
-    final_error = np.linalg.norm(final_hand_global - task_goal_global)
-
-    # Compute smoothness metrics
-    avg_velocity = np.mean(joint_velocities) if joint_velocities else 0
-    avg_acceleration = np.mean(joint_accelerations) if joint_accelerations else 0
-
-    # Analyze adaptive weight behavior
-    sdf_distances = [w['sdf_distance'] for w in adaptive_weights_history]
-    alphas = [w['alpha'] for w in adaptive_weights_history]
-    betas = [w['beta'] for w in adaptive_weights_history]
-
-    print(f"\nSDF-guided planning result (Adaptive Weights):")
-    print(f"  Final joint angles (degrees): {np.rad2deg(q_final)}")
-    print(f"  Final Score: {final_score:.4f}")
-    print(f"  Final task error: {final_error * 1000:.2f} mm")
-    print(f"  Trajectory points: {len(trajectory)}")
-    print(f"  Average SDF distance: {np.mean(sdf_values) * 1000:.2f} mm")
-    print(f"  Min/Max SDF distance: {np.min(sdf_values) * 1000:.2f} / {np.max(sdf_values) * 1000:.2f} mm")
-    print(f"  Average joint velocity: {avg_velocity:.4f} rad/iter")
-    print(f"  Average joint acceleration: {avg_acceleration:.4f} rad/iter²")
-    print(f"\nAdaptive Weight Statistics:")
-    print(f"  α (gradient) range: [{np.min(alphas):.2f}, {np.max(alphas):.2f}]")
-    print(f"  β (tangent) range: [{np.min(betas):.2f}, {np.max(betas):.2f}]")
-    print(f"  Average α: {np.mean(alphas):.2f}, Average β: {np.mean(betas):.2f}")
-    print("=" * 70 + "\n")
-
-    return trajectory, np.array(trajectory_hand_sdf), score_history_sdf, joint_history_sdf, sdf_values
+    final_error = np.linalg.norm(traj_hand_arr[-1] - task_goal_global)
+    print(f"[{method_name}] Done: Score={final_score:.4f}, Final error={final_error*1000:.2f} mm, Points={len(trajectory)}\n")
+    return trajectory, traj_hand_arr, score_history, joint_history, sdf_values, weights_history
 
 
-def run_iterations_with_optimized_ik(num_iterations, task_goal_global, optimization_method='hybrid'):
+def run_iterations_with_sdf_guidance(num_iterations, task_goal_global, reference_trajectory,
+                                     shoulder_trajectory=None):
     """
-    Use optimization algorithm to solve IK, then plan trajectory in joint space
-
-    Parameters:
-    - num_iterations: number of iterations
-    - task_goal_global: task space goal point
-    - optimization_method: 'global', 'local', or 'hybrid' (recommended)
+    Method 2: SDF-guided. Task-space direct planning with weights: goal + reference trajectory
+    (no ergo vector). Endpoint moves toward goal and toward closest point on reference trajectory.
     """
-    global current_q, global_positions, trajectory_hand, trajectory_elbow, score_history, joint_history
-
-    print("\n" + "=" * 70)
-    print("Starting trajectory planning based on optimized IK")
-    print("=" * 70)
-
-    # Step 1: Optimize to solve target joint configuration
-    if optimization_method == 'hybrid':
-        target_q, target_hand_global, target_score, position_error = \
-            find_optimal_ik_solution_hybrid(task_goal_global, shoulder, d_uar, d_lar, joint_angle_bounds)
-    else:
-        target_q, target_hand_global, target_score, position_error = \
-            find_optimal_ik_solution(task_goal_global, shoulder, d_uar, d_lar, joint_angle_bounds,
-                                     method=optimization_method)
-
-    # Verify current state
-    _, hand_current_shoulder = mos.forward_kinematics(current_q, d_uar, d_lar)
-    hand_current_global = trans_shoulder2global(hand_current_shoulder, shoulder, arm='right')
-    current_score = utils.calculate_upper_limb_score_with_joint_angles(current_q)
-
-    print(f"Current state:")
-    print(f"  Joint angles (degrees): {np.rad2deg(current_q)}")
-    print(f"  Ergonomic score: {current_score:.4f}")
-    print(f"  Wrist position: {hand_current_global}")
-
-    initial_distance = np.linalg.norm(target_hand_global - hand_current_global)
-    print(f"\nPlanning parameters:")
-    print(f"  Initial distance: {initial_distance:.4f} m")
-    print(f"  Score improvement: {current_score:.4f} -> {target_score:.4f}")
-    print(f"  Joint space distance: {np.linalg.norm(target_q - current_q):.4f} rad")
-
-    # Step 2: CSEF-guided trajectory planning in joint space
-    print("\nStarting joint space trajectory planning...")
-    trajectory_result = run_iterations_in_joint_space(num_iterations, target_q, task_goal_global)
-
-    return trajectory_result, target_q, target_hand_global
+    trajectory, trajectory_hand_sdf, score_history_sdf, joint_history_sdf, sdf_values, _ = \
+        run_iterations_task_space_direct(
+            num_iterations, task_goal_global,
+            reference_trajectory=reference_trajectory,
+            shoulder_trajectory=shoulder_trajectory,
+            w_goal=0.3, w_ref=0.7, w_ergo=0.0,
+            method_name='SDF',
+            goal_threshold=0.01, step_size=0.04,
+            use_moving_average=True, moving_avg_window=3
+        )
+    return trajectory, trajectory_hand_sdf, score_history_sdf, joint_history_sdf, sdf_values
 
 
-def run_iterations_in_joint_space(num_iterations, target_q, task_goal_global=None):
+def run_iterations_with_optimized_ik(num_iterations, task_goal_global, optimization_method='hybrid',
+                                    shoulder_trajectory=None):
+    """
+    Method 1: Ergonomic field. Task-space direct planning with weights: goal + ergo vector
+    (no reference trajectory). Endpoint moves toward goal and toward lowest-ergo point in neighborhood.
+    """
+    global current_q, global_positions, trajectory_hand, trajectory_elbow, score_history, joint_history, shoulder
+
+    trajectory_result, traj_hand, score_history_out, joint_history_out, _, _ = \
+        run_iterations_task_space_direct(
+            num_iterations, task_goal_global,
+            reference_trajectory=None,
+            shoulder_trajectory=shoulder_trajectory,
+            w_goal=0.55, w_ref=0.0, w_ergo=0.45,   # 提高 goal 引力，减小与 target 的位移差
+            method_name='Ergo',
+            goal_threshold=0.01, step_size=0.04,
+            neighbor_radius=0.02, n_ergo_samples=27,
+            use_moving_average=True, moving_avg_window=3
+        )
+    trajectory_hand = list(traj_hand)
+    score_history[:] = score_history_out
+    joint_history[:] = joint_history_out
+    target_q = np.array(trajectory_result[-1])
+    target_hand = np.array(traj_hand[-1])
+    return trajectory_result, target_q, target_hand
+
+
+def run_iterations_in_joint_space(num_iterations, target_q, task_goal_global=None, shoulder_trajectory=None):
     """
     CSEF-guided trajectory planning in joint space with tighter convergence criteria
 
@@ -976,8 +1017,9 @@ def run_iterations_in_joint_space(num_iterations, target_q, task_goal_global=Non
     - num_iterations: number of iterations
     - target_q: target joint configuration
     - task_goal_global: task space goal (for visualization only)
+    - shoulder_trajectory: optional [N, 3] shoulder positions per step (moving base)
     """
-    global current_q, global_positions, trajectory_hand, trajectory_elbow, score_history, joint_history
+    global current_q, global_positions, trajectory_hand, trajectory_elbow, score_history, joint_history, shoulder
 
     # CSEF field parameters
     q_opt = np.array(optimal_q)
@@ -1012,6 +1054,11 @@ def run_iterations_in_joint_space(num_iterations, target_q, task_goal_global=Non
             q_limited[i] = np.clip(q[i], bounds[i][0], bounds[i][1])
         return q_limited
 
+    # If shoulder trajectory provided, use first point for initial state and sync skeleton
+    if shoulder_trajectory is not None:
+        shoulder = np.array(shoulder_trajectory[0]).copy()
+        global_positions[3] = shoulder.copy()   # skeleton shoulder origin
+
     # Main loop
     trajectory = []
     q_current = current_q.copy()
@@ -1023,10 +1070,18 @@ def run_iterations_in_joint_space(num_iterations, target_q, task_goal_global=Non
     print(f"Target joint angles: {np.rad2deg(target_q)}\n")
 
     for step in range(num_iterations):
-        # 1. Calculate current state
+        # Update shoulder from reference trajectory (moving base) and sync skeleton model
+        if shoulder_trajectory is not None:
+            shoulder = np.array(shoulder_trajectory[min(step, len(shoulder_trajectory) - 1)]).copy()
+            global_positions[3] = shoulder.copy()   # skeleton shoulder origin
+
+        # 1. Calculate current state (using updated shoulder origin)
         elbow_current_shoulder, hand_current_shoulder = mos.forward_kinematics(q_current, d_uar, d_lar)
         hand_current_global = trans_shoulder2global(hand_current_shoulder, shoulder, arm='right')
         elbow_current_global = trans_shoulder2global(elbow_current_shoulder, shoulder, arm='right')
+        # Sync skeleton to current step's shoulder + q_current so ergo score is associated with correct pose
+        global_positions[4] = elbow_current_global.copy()
+        global_positions[5] = hand_current_global.copy()
         current_score = utils.calculate_upper_limb_score_with_joint_angles(q_current)
 
         # Record history
@@ -1044,7 +1099,7 @@ def run_iterations_in_joint_space(num_iterations, target_q, task_goal_global=Non
             trajectory.append(target_q.copy())
             q_current = target_q.copy()
 
-            # Update global state
+            # Update global state (skeleton: shoulder already set at start of step)
             final_elbow_shoulder, final_hand_shoulder = mos.forward_kinematics(q_current, d_uar, d_lar)
             final_hand_global = trans_shoulder2global(final_hand_shoulder, shoulder, arm='right')
             final_elbow_global = trans_shoulder2global(final_elbow_shoulder, shoulder, arm='right')
@@ -1136,395 +1191,39 @@ def run_iterations_in_joint_space(num_iterations, target_q, task_goal_global=Non
     return trajectory
 
 
-def run_iterations_with_hybrid_guidance(num_iterations, task_goal_global, reference_trajectory):
+def run_iterations_with_hybrid_guidance(num_iterations, task_goal_global, reference_trajectory,
+                                        shoulder_trajectory=None):
     """
-    Hybrid SDF-SEF trajectory planning method (Method 3)
-
-    Key Innovation:
-    - Find nearest point on reference trajectory in task space
-    - Map it to joint space as intermediate target
-    - Combine three guidances in joint space:
-        1. SEF gradient (ergonomic optimization)
-        2. SDF guidance (trajectory tracking)
-        3. Goal attraction (task completion)
+    Method 3: Hybrid. Task-space direct planning with weights: goal + reference trajectory + ergo vector.
+    Endpoint moves toward goal, toward closest point on reference trajectory, and toward lowest-ergo
+    point in neighborhood.
     """
-    global current_q, global_positions, shoulder, d_uar, d_lar, joint_angle_bounds
+    (trajectory, trajectory_hand_hybrid, score_history_hybrid, joint_history_hybrid,
+     sdf_values, guidance_weights_history) = run_iterations_task_space_direct(
+        num_iterations, task_goal_global,
+        reference_trajectory=reference_trajectory,
+        shoulder_trajectory=shoulder_trajectory,
+        w_goal=0.25, w_ref=0.4, w_ergo=0.35,
+        method_name='Hybrid',
+        goal_threshold=0.01, step_size=0.04,
+        neighbor_radius=0.02, n_ergo_samples=27,
+        use_moving_average=True, moving_avg_window=3
+    )
+    return (trajectory, trajectory_hand_hybrid, score_history_hybrid, joint_history_hybrid,
+            sdf_values, guidance_weights_history)
 
-    print("\n" + "=" * 70)
-    print("Starting HYBRID SDF-SEF trajectory planning (Method 3)")
-    print("=" * 70)
-
-    # Initialize SDF field
-    sdf_field = TrajectorySDFField(reference_trajectory, sigma=0.05)
-
-    # ========== HYBRID METHOD PARAMETERS ==========
-    # Three-way guidance weights
-    alpha_sef = 0.3  # SEF (ergonomic) weight
-    alpha_sdf = 0.4  # SDF (trajectory tracking) weight
-    alpha_goal = 0.3  # Goal attraction weight
-
-    # Adaptive weight parameters
-    sdf_near_threshold = 0.01  # 1cm - near trajectory
-    sdf_far_threshold = 0.05  # 5cm - far from trajectory
-
-    # When near trajectory, reduce SDF weight, increase SEF weight
-    weight_adjust_factor = 0.5  # How much to adjust weights
-
-    # Step size parameters
-    step_size_base = 0.05
-    step_size_near = 0.04
-    step_size_far = 0.06
-
-    # Smoothness parameters
-    joint_velocity_weight = 0.3
-    joint_acceleration_weight = 0.2
-    use_moving_average = True
-    moving_avg_window = 3
-
-    # Convergence threshold
-    goal_threshold = 0.01  # 10mm
-
-    # SEF parameters
-    q_opt = np.array(optimal_q)
-    comfort_threshold = 0.1
-
-    # Storage
-    trajectory = []
-    trajectory_hand_hybrid = []
-    trajectory_elbow_hybrid = []
-    score_history_hybrid = []
-    joint_history_hybrid = []
-    sdf_values = []
-    intermediate_targets = []  # Store intermediate joint targets
-    guidance_weights_history = []  # Track weight evolution
-
-    joint_velocities = []
-    joint_accelerations = []
-
-    q_current = current_q.copy()
-    trajectory.append(q_current.copy())
-
-    # Initial state
-    _, hand_current_shoulder = mos.forward_kinematics(q_current, d_uar, d_lar)
-    hand_current_global = trans_shoulder2global(hand_current_shoulder, shoulder, arm='right')
-    trajectory_hand_hybrid.append(hand_current_global.copy())
-
-    print(f"Initial position: {hand_current_global}")
-    print(f"Target position: {task_goal_global}")
-    print(f"Initial distance: {np.linalg.norm(task_goal_global - hand_current_global):.4f} m")
-    print(f"\nHybrid Guidance Strategy:")
-    print(f"  SEF weight: {alpha_sef:.2f} (ergonomic optimization)")
-    print(f"  SDF weight: {alpha_sdf:.2f} (trajectory tracking)")
-    print(f"  Goal weight: {alpha_goal:.2f} (task completion)")
-    print(f"  Adaptive adjustment based on SDF distance\n")
-
-    # Helper functions for SEF
-    def calculate_sef(q):
-        ergo_score = utils.calculate_upper_limb_score_with_joint_angles(q)
-        return ergo_score - comfort_threshold
-
-    def calculate_sef_gradient(q, delta=1e-5):
-        grad = np.zeros_like(q)
-        sef_q = calculate_sef(q)
-
-        for i in range(len(q)):
-            q_plus = q.copy()
-            q_plus[i] += delta
-            sef_plus = calculate_sef(q_plus)
-            grad[i] = (sef_plus - sef_q) / delta
-
-        return grad
-
-    def enforce_joint_limits(q, bounds):
-        q_limited = np.copy(q)
-        for i in range(len(q)):
-            q_limited[i] = np.clip(q[i], bounds[i][0], bounds[i][1])
-        return q_limited
-
-    for step in range(num_iterations):
-        # 1. Compute current state in task space
-        elbow_current_shoulder, hand_current_shoulder = mos.forward_kinematics(q_current, d_uar, d_lar)
-        hand_current_global = trans_shoulder2global(hand_current_shoulder, shoulder, arm='right')
-        elbow_current_global = trans_shoulder2global(elbow_current_shoulder, shoulder, arm='right')
-        current_score = utils.calculate_upper_limb_score_with_joint_angles(q_current)
-
-        # Record history
-        score_history_hybrid.append(current_score)
-        joint_history_hybrid.append(q_current.copy())
-
-        # 2. Find nearest point on reference trajectory in TASK SPACE
-        sdf_distance, closest_point_task, closest_idx = sdf_field.compute_sdf(hand_current_global)
-        sdf_values.append(sdf_distance)
-
-        # 3. Map closest point to JOINT SPACE as intermediate target
-        # Convert closest point to shoulder frame
-        closest_point_relative = closest_point_task - shoulder
-        closest_point_shoulder = np.array([
-            -closest_point_relative[1],
-            -closest_point_relative[0],
-            closest_point_relative[2]
-        ])
-
-        # Solve IK for intermediate target (with looser tolerance)
-        def ik_intermediate_objective(q):
-            _, hand_shoulder = mos.forward_kinematics(q, d_uar, d_lar)
-            position_error = np.linalg.norm(hand_shoulder - closest_point_shoulder)
-
-            # Add small ergonomic penalty to prefer comfortable configurations
-            ergo_penalty = 0.01 * utils.calculate_upper_limb_score_with_joint_angles(q)
-
-            return position_error + ergo_penalty
-
-        result_ik = minimize(
-            ik_intermediate_objective,
-            q_current,
-            method='SLSQP',
-            bounds=joint_angle_bounds,
-            options={'maxiter': 100, 'ftol': 1e-6}
-        )
-
-        q_intermediate = result_ik.x
-        intermediate_targets.append(q_intermediate.copy())
-
-        # 4. Compute final goal in joint space (if not already computed)
-        goal_direction_task = task_goal_global - hand_current_global
-        goal_distance_task = np.linalg.norm(goal_direction_task)
-
-        # Check if reached goal
-        if goal_distance_task < goal_threshold:
-            print(f"Reached target at iteration {step}")
-            break
-
-        # Map final goal to joint space (use cached result or compute)
-        task_goal_relative = task_goal_global - shoulder
-        task_goal_shoulder = np.array([
-            -task_goal_relative[1],
-            -task_goal_relative[0],
-            task_goal_relative[2]
-        ])
-
-        def ik_goal_objective(q):
-            _, hand_shoulder = mos.forward_kinematics(q, d_uar, d_lar)
-            return np.linalg.norm(hand_shoulder - task_goal_shoulder)
-
-        result_goal = minimize(
-            ik_goal_objective,
-            q_current,
-            method='SLSQP',
-            bounds=joint_angle_bounds,
-            options={'maxiter': 100, 'ftol': 1e-6}
-        )
-
-        q_goal = result_goal.x
-
-        # ========== COMPUTE THREE GUIDANCE DIRECTIONS IN JOINT SPACE ==========
-
-        # Direction 1: SEF gradient (ergonomic optimization)
-        sef_gradient = calculate_sef_gradient(q_current)
-        sef_gradient_norm = np.linalg.norm(sef_gradient)
-
-        if sef_gradient_norm > 1e-6:
-            sef_direction = -sef_gradient / sef_gradient_norm  # Negative to minimize SEF
-        else:
-            sef_direction = np.zeros(4)
-
-        # Direction 2: SDF guidance (toward intermediate target on trajectory)
-        sdf_direction_joint = q_intermediate - q_current
-        sdf_direction_joint_norm = np.linalg.norm(sdf_direction_joint)
-
-        if sdf_direction_joint_norm > 1e-6:
-            sdf_direction_joint = sdf_direction_joint / sdf_direction_joint_norm
-        else:
-            sdf_direction_joint = np.zeros(4)
-
-        # Direction 3: Goal attraction (toward final goal)
-        goal_direction_joint = q_goal - q_current
-        goal_direction_joint_norm = np.linalg.norm(goal_direction_joint)
-
-        if goal_direction_joint_norm > 1e-6:
-            goal_direction_joint = goal_direction_joint / goal_direction_joint_norm
-        else:
-            goal_direction_joint = np.zeros(4)
-
-        # ========== ADAPTIVE WEIGHT ADJUSTMENT ==========
-        # When near trajectory: increase SEF weight, decrease SDF weight
-        # When far from trajectory: increase SDF weight, decrease SEF weight
-
-        if sdf_distance <= sdf_near_threshold:
-            # NEAR: prioritize ergonomics
-            blend_factor = 0.0
-        elif sdf_distance >= sdf_far_threshold:
-            # FAR: prioritize trajectory tracking
-            blend_factor = 1.0
-        else:
-            # TRANSITION: smooth interpolation
-            blend_factor = (sdf_distance - sdf_near_threshold) / (sdf_far_threshold - sdf_near_threshold)
-
-        # Adjust weights adaptively
-        alpha_sef_adaptive = alpha_sef * (1.0 + weight_adjust_factor * (1.0 - blend_factor))
-        alpha_sdf_adaptive = alpha_sdf * (1.0 + weight_adjust_factor * blend_factor)
-        alpha_goal_adaptive = alpha_goal  # Keep goal weight constant
-
-        # Normalize weights
-        total_weight = alpha_sef_adaptive + alpha_sdf_adaptive + alpha_goal_adaptive
-        alpha_sef_adaptive /= total_weight
-        alpha_sdf_adaptive /= total_weight
-        alpha_goal_adaptive /= total_weight
-
-        # Store weights for analysis
-        guidance_weights_history.append({
-            'sdf_distance': sdf_distance,
-            'alpha_sef': alpha_sef_adaptive,
-            'alpha_sdf': alpha_sdf_adaptive,
-            'alpha_goal': alpha_goal_adaptive,
-            'blend_factor': blend_factor
-        })
-
-        # ========== COMBINE THREE DIRECTIONS ==========
-        combined_direction = (alpha_sef_adaptive * sef_direction +
-                              alpha_sdf_adaptive * sdf_direction_joint +
-                              alpha_goal_adaptive * goal_direction_joint)
-
-        combined_norm = np.linalg.norm(combined_direction)
-        if combined_norm > 1e-6:
-            combined_direction_normalized = combined_direction / combined_norm
-        else:
-            combined_direction_normalized = goal_direction_joint
-
-        # ========== ADAPTIVE STEP SIZE ==========
-        # Base step size on SDF distance and goal proximity
-        step_size = step_size_near + blend_factor * (step_size_far - step_size_near)
-
-        # Reduce step size when approaching goal
-        progress_ratio = 1.0 - (goal_distance_task / np.linalg.norm(task_goal_global - trajectory_hand_hybrid[0]))
-        adaptive_step = step_size * (1.0 - 0.4 * progress_ratio)
-        adaptive_step = min(adaptive_step, goal_direction_joint_norm * 0.5)
-
-        # ========== UPDATE JOINT ANGLES ==========
-        q_next = q_current + adaptive_step * combined_direction_normalized
-
-        # Enforce joint limits
-        q_next = enforce_joint_limits(q_next, joint_angle_bounds)
-
-        # ========== APPLY MOVING AVERAGE FILTER ==========
-        if use_moving_average and len(trajectory) >= moving_avg_window:
-            recent_qs = np.array(trajectory[-(moving_avg_window - 1):] + [q_next])
-            q_smoothed = np.mean(recent_qs, axis=0)
-
-            # Verify smoothed configuration still reaches near target
-            _, hand_check_shoulder = mos.forward_kinematics(q_smoothed, d_uar, d_lar)
-            hand_check_global = trans_shoulder2global(hand_check_shoulder, shoulder, arm='right')
-            check_error = np.linalg.norm(hand_check_global - (hand_current_global + adaptive_step * 0.5))
-
-            if check_error < 0.03:  # 3cm tolerance
-                q_next = q_smoothed
-
-        # ========== UPDATE TRAJECTORY ==========
-        trajectory.append(q_next.copy())
-
-        new_elbow_shoulder, new_hand_shoulder = mos.forward_kinematics(q_next, d_uar, d_lar)
-        new_hand_global = trans_shoulder2global(new_hand_shoulder, shoulder, arm='right')
-        new_elbow_global = trans_shoulder2global(new_elbow_shoulder, shoulder, arm='right')
-
-        trajectory_hand_hybrid.append(new_hand_global.copy())
-        trajectory_elbow_hybrid.append(new_elbow_global.copy())
-
-        # Track velocities and accelerations
-        if len(trajectory) > 1:
-            velocity = q_next - trajectory[-2]
-            joint_velocities.append(np.linalg.norm(velocity))
-
-            if len(trajectory) > 2:
-                prev_velocity = trajectory[-2] - trajectory[-3]
-                acceleration = velocity - prev_velocity
-                joint_accelerations.append(np.linalg.norm(acceleration))
-
-        # ========== PRINT PROGRESS ==========
-        if step % 5 == 0 or step == num_iterations - 1:
-            print(f"Iter {step:3d}: Score={current_score:.4f}, "
-                  f"SDF={sdf_distance * 1000:.1f}mm, "
-                  f"Goal={goal_distance_task * 1000:.1f}mm, "
-                  f"αSEF={alpha_sef_adaptive:.2f}, "
-                  f"αSDF={alpha_sdf_adaptive:.2f}, "
-                  f"αGoal={alpha_goal_adaptive:.2f}")
-
-        # Update current state
-        q_current = q_next.copy()
-
-    # ========== POST-PROCESSING: MULTI-STAGE SMOOTHING ==========
-    print("\nApplying multi-stage trajectory smoothing...")
-
-    # Stage 1: Joint space smoothing
-    trajectory_array = np.array(trajectory)
-    if len(trajectory_array) > 5:
-        print("  Stage 1: Joint space smoothing...")
-        trajectory_smoothed = smooth_trajectory(
-            trajectory_array,
-            smoothing_factor=0.4,
-            iterations=3
-        )
-        trajectory = trajectory_smoothed.tolist()
-
-        # Recompute task space from smoothed joint space
-        trajectory_hand_hybrid = []
-        for q in trajectory_smoothed:
-            _, hand_shoulder = mos.forward_kinematics(q, d_uar, d_lar)
-            hand_global = trans_shoulder2global(hand_shoulder, shoulder, arm='right')
-            trajectory_hand_hybrid.append(hand_global)
-
-    # Stage 2: Light task space smoothing
-    trajectory_hand_hybrid_array = np.array(trajectory_hand_hybrid)
-    if len(trajectory_hand_hybrid_array) > 5:
-        print("  Stage 2: Task space smoothing...")
-        trajectory_hand_hybrid_smoothed = smooth_trajectory(
-            trajectory_hand_hybrid_array,
-            smoothing_factor=0.3,
-            iterations=2
-        )
-        trajectory_hand_hybrid = trajectory_hand_hybrid_smoothed
-
-    # Final verification
-    q_final = trajectory[-1] if isinstance(trajectory[-1], np.ndarray) else np.array(trajectory[-1])
-    _, final_hand_shoulder = mos.forward_kinematics(q_final, d_uar, d_lar)
-    final_hand_global = trans_shoulder2global(final_hand_shoulder, shoulder, arm='right')
-    final_score = utils.calculate_upper_limb_score_with_joint_angles(q_final)
-    final_error = np.linalg.norm(final_hand_global - task_goal_global)
-
-    # Compute smoothness metrics
-    avg_velocity = np.mean(joint_velocities) if joint_velocities else 0
-    avg_acceleration = np.mean(joint_accelerations) if joint_accelerations else 0
-
-    # Analyze guidance weight behavior
-    alphas_sef = [w['alpha_sef'] for w in guidance_weights_history]
-    alphas_sdf = [w['alpha_sdf'] for w in guidance_weights_history]
-    alphas_goal = [w['alpha_goal'] for w in guidance_weights_history]
-
-    print(f"\nHybrid SDF-SEF planning result:")
-    print(f"  Final joint angles (degrees): {np.rad2deg(q_final)}")
-    print(f"  Final Score: {final_score:.4f}")
-    print(f"  Final task error: {final_error * 1000:.2f} mm")
-    print(f"  Trajectory points: {len(trajectory)}")
-    print(f"  Average SDF distance: {np.mean(sdf_values) * 1000:.2f} mm")
-    print(f"  Average joint velocity: {avg_velocity:.4f} rad/iter")
-    print(f"  Average joint acceleration: {avg_acceleration:.4f} rad/iter²")
-    print(f"\nGuidance Weight Statistics:")
-    print(f"  αSEF range: [{np.min(alphas_sef):.2f}, {np.max(alphas_sef):.2f}], avg: {np.mean(alphas_sef):.2f}")
-    print(f"  αSDF range: [{np.min(alphas_sdf):.2f}, {np.max(alphas_sdf):.2f}], avg: {np.mean(alphas_sdf):.2f}")
-    print(f"  αGoal range: [{np.min(alphas_goal):.2f}, {np.max(alphas_goal):.2f}], avg: {np.mean(alphas_goal):.2f}")
-    print("=" * 70 + "\n")
-
-    return (trajectory, np.array(trajectory_hand_hybrid), score_history_hybrid,
-            joint_history_hybrid, sdf_values, guidance_weights_history)
 
 
 def compare_three_methods(trajectory_hand_ergo, score_history_ergo, joint_history_ergo,
                           trajectory_hand_sdf, score_history_sdf, joint_history_sdf, sdf_values_sdf,
                           trajectory_hand_hybrid, score_history_hybrid, joint_history_hybrid, sdf_values_hybrid,
                           weights_history_hybrid,
-                          reference_trajectory, task_goal_global):
+                          reference_trajectory, task_goal_global, shoulder_trajectory=None):
     """
-    Compare results of THREE planning methods with comprehensive visualization
+    Compare results of THREE planning methods with comprehensive visualization.
+    shoulder_trajectory: optional [N, 3] shoulder positions (moving base); used for reference shoulder in plot.
     """
+    shoulder_ref = np.array(shoulder_trajectory[0]).copy() if shoulder_trajectory is not None else np.array(shoulder).copy()
 
     print("\n" + "=" * 70)
     print("COMPARISON OF THREE PLANNING METHODS")
@@ -1544,10 +1243,14 @@ def compare_three_methods(trajectory_hand_ergo, score_history_ergo, joint_histor
     ax1.set_zlim(zlim)
     ax1.view_init(elev=10, azim=80)
 
-    utils.plot_skeleton(ax1, global_positions, skeleton_parent_indices, color='gray')
+    plot_right_upper_limb_skeleton(ax1, global_positions, color='gray', linewidth=3)
 
-    ax1.scatter(shoulder[0], shoulder[1], shoulder[2],
-                c='black', s=120, label='Shoulder', marker='o', edgecolors='white', linewidth=1.5)
+    if shoulder_trajectory is not None:
+        sh_traj = np.array(shoulder_trajectory)
+        ax1.plot(sh_traj[:, 0], sh_traj[:, 1], sh_traj[:, 2],
+                 c='gray', linewidth=1.5, alpha=0.6, linestyle=':', label='Shoulder path')
+    ax1.scatter(shoulder_ref[0], shoulder_ref[1], shoulder_ref[2],
+                c='black', s=120, label='Shoulder (ref)', marker='o', edgecolors='white', linewidth=1.5)
     ax1.scatter(optimal_position[0], optimal_position[1], optimal_position[2],
                 c='magenta', s=120, label='Ergonomic Optimal', marker='^', edgecolors='white', linewidth=1.5)
 
@@ -1586,10 +1289,14 @@ def compare_three_methods(trajectory_hand_ergo, score_history_ergo, joint_histor
     ax2.set_zlim(zlim)
     ax2.view_init(elev=10, azim=80)
 
-    utils.plot_skeleton(ax2, global_positions, skeleton_parent_indices, color='gray')
+    plot_right_upper_limb_skeleton(ax2, global_positions, color='gray', linewidth=3)
 
-    ax2.scatter(shoulder[0], shoulder[1], shoulder[2],
-                c='black', s=120, label='Shoulder', marker='o', edgecolors='white', linewidth=1.5)
+    if shoulder_trajectory is not None:
+        sh_traj = np.array(shoulder_trajectory)
+        ax2.plot(sh_traj[:, 0], sh_traj[:, 1], sh_traj[:, 2],
+                 c='gray', linewidth=1.5, alpha=0.6, linestyle=':', label='Shoulder path')
+    ax2.scatter(shoulder_ref[0], shoulder_ref[1], shoulder_ref[2],
+                c='black', s=120, label='Shoulder (ref)', marker='o', edgecolors='white', linewidth=1.5)
 
     ref_traj = np.array(reference_trajectory)
     ax2.plot(ref_traj[:, 0], ref_traj[:, 1], ref_traj[:, 2],
@@ -1632,10 +1339,14 @@ def compare_three_methods(trajectory_hand_ergo, score_history_ergo, joint_histor
     ax3.set_zlim(zlim)
     ax3.view_init(elev=10, azim=80)
 
-    utils.plot_skeleton(ax3, global_positions, skeleton_parent_indices, color='gray')
+    plot_right_upper_limb_skeleton(ax3, global_positions, color='gray', linewidth=3)
 
-    ax3.scatter(shoulder[0], shoulder[1], shoulder[2],
-                c='black', s=120, label='Shoulder', marker='o', edgecolors='white', linewidth=1.5)
+    if shoulder_trajectory is not None:
+        sh_traj = np.array(shoulder_trajectory)
+        ax3.plot(sh_traj[:, 0], sh_traj[:, 1], sh_traj[:, 2],
+                 c='gray', linewidth=1.5, alpha=0.6, linestyle=':', label='Shoulder path')
+    ax3.scatter(shoulder_ref[0], shoulder_ref[1], shoulder_ref[2],
+                c='black', s=120, label='Shoulder (ref)', marker='o', edgecolors='white', linewidth=1.5)
     ax3.scatter(optimal_position[0], optimal_position[1], optimal_position[2],
                 c='magenta', s=120, label='Ergonomic Optimal', marker='^', edgecolors='white', linewidth=1.5)
 
@@ -1674,158 +1385,6 @@ def compare_three_methods(trajectory_hand_ergo, score_history_ergo, joint_histor
 
     plt.tight_layout()
     plt.savefig('comparison_3methods_3d_trajectories.png', dpi=300, bbox_inches='tight')
-    plt.show()
-
-    # ============== Figure 2: Score Evolution and Statistics ==============
-    fig2 = plt.figure(figsize=(20, 12))
-
-    # Subplot 1: Ergonomic Score Comparison
-    ax1 = fig2.add_subplot(3, 4, 1)
-    iterations_ergo = range(1, len(score_history_ergo) + 1)
-    iterations_sdf = range(1, len(score_history_sdf) + 1)
-    iterations_hybrid = range(1, len(score_history_hybrid) + 1)
-
-    ax1.plot(iterations_ergo, score_history_ergo, linewidth=2.5, color='steelblue',
-             label='Method 1: Ergonomic', alpha=0.8)
-    ax1.plot(iterations_sdf, score_history_sdf, linewidth=2.5, color='coral',
-             label='Method 2: SDF', alpha=0.8)
-    ax1.plot(iterations_hybrid, score_history_hybrid, linewidth=2.5, color='purple',
-             label='Method 3: Hybrid', alpha=0.8)
-    ax1.axhline(y=score_history_ergo[0], color='gray', linestyle=':', alpha=0.5,
-                label=f'Initial: {score_history_ergo[0]:.3f}')
-
-    ax1.set_xlabel('Iteration', fontsize=11, fontweight='bold')
-    ax1.set_ylabel('Ergonomic Score', fontsize=11, fontweight='bold')
-    ax1.set_title('Ergonomic Score Evolution', fontsize=12, fontweight='bold')
-    ax1.legend(fontsize=9)
-    ax1.grid(True, alpha=0.3)
-
-    # Subplot 2: SDF Distance (Methods 2 & 3)
-    ax2 = fig2.add_subplot(3, 4, 2)
-    ax2.plot(iterations_sdf, np.array(sdf_values_sdf) * 1000, linewidth=2.5,
-             color='coral', alpha=0.8, label='Method 2: SDF')
-    ax2.plot(iterations_hybrid, np.array(sdf_values_hybrid) * 1000, linewidth=2.5,
-             color='purple', alpha=0.8, label='Method 3: Hybrid')
-    ax2.set_xlabel('Iteration', fontsize=11, fontweight='bold')
-    ax2.set_ylabel('SDF Distance (mm)', fontsize=11, fontweight='bold')
-    ax2.set_title('Distance to Reference Trajectory', fontsize=12, fontweight='bold')
-    ax2.legend(fontsize=9)
-    ax2.grid(True, alpha=0.3)
-
-    # Subplot 3: Goal Distance
-    ax3 = fig2.add_subplot(3, 4, 3)
-    goal_dist_ergo = [np.linalg.norm(p - task_goal_global) * 1000 for p in traj_ergo]
-    goal_dist_sdf = [np.linalg.norm(p - task_goal_global) * 1000 for p in traj_sdf]
-    goal_dist_hybrid = [np.linalg.norm(p - task_goal_global) * 1000 for p in traj_hybrid]
-
-    ax3.plot(range(len(goal_dist_ergo)), goal_dist_ergo, linewidth=2.5,
-             color='steelblue', label='Method 1', alpha=0.8)
-    ax3.plot(range(len(goal_dist_sdf)), goal_dist_sdf, linewidth=2.5,
-             color='coral', label='Method 2', alpha=0.8)
-    ax3.plot(range(len(goal_dist_hybrid)), goal_dist_hybrid, linewidth=2.5,
-             color='purple', label='Method 3', alpha=0.8)
-    ax3.set_xlabel('Trajectory Point', fontsize=11, fontweight='bold')
-    ax3.set_ylabel('Distance to Goal (mm)', fontsize=11, fontweight='bold')
-    ax3.set_title('Goal Convergence', fontsize=12, fontweight='bold')
-    ax3.legend(fontsize=9)
-    ax3.grid(True, alpha=0.3)
-
-    # Subplot 4: Hybrid Method Weight Evolution
-    ax4 = fig2.add_subplot(3, 4, 4)
-    if weights_history_hybrid:
-        iters = range(len(weights_history_hybrid))
-        alphas_sef = [w['alpha_sef'] for w in weights_history_hybrid]
-        alphas_sdf = [w['alpha_sdf'] for w in weights_history_hybrid]
-        alphas_goal = [w['alpha_goal'] for w in weights_history_hybrid]
-
-        ax4.plot(iters, alphas_sef, linewidth=2, color='green', label='αSEF (Ergonomic)', alpha=0.8)
-        ax4.plot(iters, alphas_sdf, linewidth=2, color='blue', label='αSDF (Trajectory)', alpha=0.8)
-        ax4.plot(iters, alphas_goal, linewidth=2, color='red', label='αGoal (Task)', alpha=0.8)
-        ax4.set_xlabel('Iteration', fontsize=11, fontweight='bold')
-        ax4.set_ylabel('Weight Value', fontsize=11, fontweight='bold')
-        ax4.set_title('Method 3: Adaptive Weights', fontsize=12, fontweight='bold')
-        ax4.legend(fontsize=9)
-        ax4.grid(True, alpha=0.3)
-
-    # Subplots 5-8: Joint Angle Evolution
-    joint_labels = ['Shoulder Flexion', 'Shoulder Abduction', 'Elbow Flexion', 'Forearm Rotation']
-
-    for i in range(4):
-        ax = fig2.add_subplot(3, 4, 5 + i)
-
-        joint_ergo = np.array([np.rad2deg(q[i]) for q in joint_history_ergo])
-        joint_sdf = np.array([np.rad2deg(q[i]) for q in joint_history_sdf])
-        joint_hybrid = np.array([np.rad2deg(q[i]) for q in joint_history_hybrid])
-
-        ax.plot(iterations_ergo, joint_ergo, linewidth=2, color='steelblue',
-                label='Method 1', alpha=0.8)
-        ax.plot(iterations_sdf, joint_sdf, linewidth=2, color='coral',
-                label='Method 2', alpha=0.8)
-        ax.plot(iterations_hybrid, joint_hybrid, linewidth=2, color='purple',
-                label='Method 3', alpha=0.8)
-
-        ax.set_xlabel('Iteration', fontsize=10, fontweight='bold')
-        ax.set_ylabel('Angle (deg)', fontsize=10, fontweight='bold')
-        ax.set_title(joint_labels[i], fontsize=11, fontweight='bold')
-        ax.legend(fontsize=8)
-        ax.grid(True, alpha=0.3)
-
-    # Subplots 9-12: Statistical Comparisons
-    methods = ['Method 1\nErgonomic', 'Method 2\nSDF', 'Method 3\nHybrid']
-    colors = ['steelblue', 'coral', 'purple']
-
-    # Subplot 9: Path Length
-    ax9 = fig2.add_subplot(3, 4, 9)
-    lengths = [path_length_ergo, path_length_sdf, path_length_hybrid]
-    bars = ax9.bar(methods, lengths, color=colors, alpha=0.7, edgecolor='black', linewidth=1.5)
-    ax9.set_ylabel('Path Length (m)', fontsize=10, fontweight='bold')
-    ax9.set_title('Total Path Length', fontsize=11, fontweight='bold')
-    ax9.grid(axis='y', alpha=0.3)
-    for bar, val in zip(bars, lengths):
-        height = bar.get_height()
-        ax9.text(bar.get_x() + bar.get_width() / 2., height,
-                 f'{val:.3f}', ha='center', va='bottom', fontweight='bold', fontsize=9)
-
-    # Subplot 10: Final Error
-    ax10 = fig2.add_subplot(3, 4, 10)
-    errors = [final_error_ergo * 1000, final_error_sdf * 1000, final_error_hybrid * 1000]
-    bars = ax10.bar(methods, errors, color=colors, alpha=0.7, edgecolor='black', linewidth=1.5)
-    ax10.set_ylabel('Error (mm)', fontsize=10, fontweight='bold')
-    ax10.set_title('Final Position Error', fontsize=11, fontweight='bold')
-    ax10.grid(axis='y', alpha=0.3)
-    for bar, val in zip(bars, errors):
-        height = bar.get_height()
-        ax10.text(bar.get_x() + bar.get_width() / 2., height,
-                  f'{val:.1f}', ha='center', va='bottom', fontweight='bold', fontsize=9)
-
-    # Subplot 11: Final Score
-    ax11 = fig2.add_subplot(3, 4, 11)
-    final_scores = [score_history_ergo[-1], score_history_sdf[-1], score_history_hybrid[-1]]
-    bars = ax11.bar(methods, final_scores, color=colors, alpha=0.7, edgecolor='black', linewidth=1.5)
-    ax11.set_ylabel('Score', fontsize=10, fontweight='bold')
-    ax11.set_title('Final Ergonomic Score', fontsize=11, fontweight='bold')
-    ax11.grid(axis='y', alpha=0.3)
-    for bar, val in zip(bars, final_scores):
-        height = bar.get_height()
-        ax11.text(bar.get_x() + bar.get_width() / 2., height,
-                  f'{val:.3f}', ha='center', va='bottom', fontweight='bold', fontsize=9)
-
-    # Subplot 12: Score Improvement
-    ax12 = fig2.add_subplot(3, 4, 12)
-    improvements = [score_history_ergo[0] - score_history_ergo[-1],
-                    score_history_sdf[0] - score_history_sdf[-1],
-                    score_history_hybrid[0] - score_history_hybrid[-1]]
-    bars = ax12.bar(methods, improvements, color=colors, alpha=0.7, edgecolor='black', linewidth=1.5)
-    ax12.set_ylabel('Improvement', fontsize=10, fontweight='bold')
-    ax12.set_title('Score Improvement', fontsize=11, fontweight='bold')
-    ax12.grid(axis='y', alpha=0.3)
-    for bar, val in zip(bars, improvements):
-        height = bar.get_height()
-        ax12.text(bar.get_x() + bar.get_width() / 2., height,
-                  f'{val:.3f}', ha='center', va='bottom', fontweight='bold', fontsize=9)
-
-    plt.tight_layout()
-    plt.savefig('comparison_3methods_statistics.png', dpi=300, bbox_inches='tight')
     plt.show()
 
     # ============== Print Summary Table ==============
@@ -2008,8 +1567,8 @@ def visualize_3d_trajectory(task_goal_global=None):
     ax.set_ylim((-0.2, 0.8))
     ax.view_init(elev=30, azim=-30)
 
-    # Plot skeleton
-    utils.plot_skeleton(ax, global_positions, skeleton_parent_indices, color='gray')
+    # Plot right upper limb skeleton only (shoulder -> elbow -> wrist)
+    plot_right_upper_limb_skeleton(ax, global_positions, color='gray', linewidth=3)
 
     new_elbow = global_positions[4]
     new_hand = global_positions[5]
@@ -2047,12 +1606,6 @@ def visualize_3d_trajectory(task_goal_global=None):
     # Plot initial and final wrist positions
     ax.scatter(traj[0, 0], traj[0, 1], traj[0, 2],
                c='cyan', s=120, marker='s', label='Start Position', edgecolors='black', linewidth=1.5)
-
-    # Plot arm skeleton
-    ax.plot([shoulder[0], new_elbow[0], new_hand[0]],
-            [shoulder[1], new_elbow[1], new_hand[1]],
-            [shoulder[2], new_elbow[2], new_hand[2]],
-            c='red', linewidth=4.5, label='Arm', alpha=0.9)
 
     # Plot optimal ergonomic position
     ax.scatter(optimal_position[0], optimal_position[1], optimal_position[2],
@@ -2228,12 +1781,25 @@ if __name__ == '__main__':
     # Set number of iterations
     num_iterations = 100
 
+    # Generate shoulder reference trajectory (small-range motion to simulate real body movement)
+    # trajectory_type: 'sinusoidal', 'circular', 'ellipse', 'straight'
+    shoulder_trajectory = generate_shoulder_reference_trajectory(
+        shoulder,
+        num_points=num_iterations,
+        amplitude_x=0.00,   # ±2cm in X
+        amplitude_y=0.10,   # ±2cm in Y
+        amplitude_z=-0.00,   # ±1cm in Z
+        trajectory_type='straight'   # 直线：从 (center-amp) 到 (center+amp) 线性插值
+    )
+    print(f"Shoulder moving-base: trajectory length={len(shoulder_trajectory)}, type=straight, "
+          f"amplitude approx. ±(2,2,1)cm (x,y,z)")
+
     # Define task goal
     # 定义任务目标
     task_goal_global = hand_current + np.array([0.1, 0.0, -0.2])
 
     print(f"\n{'=' * 70}")
-    print(f"Starting THREE-METHOD COMPARATIVE trajectory planning study")
+    print(f"Starting THREE-METHOD COMPARATIVE trajectory planning study (moving shoulder base)")
     print(f"Task goal (global): {task_goal_global}")
     print(f"{'=' * 70}\n")
 
@@ -2242,7 +1808,11 @@ if __name__ == '__main__':
     print("RUNNING METHOD 1: ERGONOMIC FIELD GUIDANCE")
     print("=" * 70)
 
+    # Save full initial state so Method 2 and 3 start from the same pose (fix Y-direction start mismatch)
     current_q_backup = current_q.copy()
+    shoulder_backup = shoulder.copy()
+    global_positions_backup = {3: global_positions[3].copy(), 4: global_positions[4].copy(), 5: global_positions[5].copy()}
+
     trajectory_hand = [hand_current.copy()]
     trajectory_elbow = [elbow_current.copy()]
     score_history = []
@@ -2251,7 +1821,8 @@ if __name__ == '__main__':
     trajectory_result_ergo, target_q, target_hand = run_iterations_with_optimized_ik(
         num_iterations=num_iterations,
         task_goal_global=task_goal_global,
-        optimization_method='hybrid'
+        optimization_method='hybrid',
+        shoulder_trajectory=shoulder_trajectory
     )
 
     trajectory_hand_ergo = np.array(trajectory_hand).copy()
@@ -2272,13 +1843,19 @@ if __name__ == '__main__':
         trajectory_type='straight'
     )
 
+    # Restore full initial state so Method 2 starts from same Y (and X,Z) as Method 1
     current_q = current_q_backup.copy()
+    shoulder = shoulder_backup.copy()
+    global_positions[3] = global_positions_backup[3].copy()
+    global_positions[4] = global_positions_backup[4].copy()
+    global_positions[5] = global_positions_backup[5].copy()
 
     trajectory_result_sdf, trajectory_hand_sdf, score_history_sdf, joint_history_sdf, sdf_values = \
         run_iterations_with_sdf_guidance(
             num_iterations=num_iterations,
             task_goal_global=task_goal_global,
-            reference_trajectory=reference_trajectory
+            reference_trajectory=reference_trajectory,
+            shoulder_trajectory=shoulder_trajectory
         )
 
     print(f"\nMethod 2 completed: Final Score={score_history_sdf[-1]:.4f}, Points={len(trajectory_hand_sdf)}")
@@ -2288,14 +1865,20 @@ if __name__ == '__main__':
     print("RUNNING METHOD 3: HYBRID SDF-SEF GUIDANCE")
     print("=" * 70)
 
+    # Restore full initial state so Method 3 starts from same Y (and X,Z) as Method 1
     current_q = current_q_backup.copy()
+    shoulder = shoulder_backup.copy()
+    global_positions[3] = global_positions_backup[3].copy()
+    global_positions[4] = global_positions_backup[4].copy()
+    global_positions[5] = global_positions_backup[5].copy()
 
     (trajectory_result_hybrid, trajectory_hand_hybrid, score_history_hybrid,
      joint_history_hybrid, sdf_values_hybrid, weights_history_hybrid) = \
         run_iterations_with_hybrid_guidance(
             num_iterations=num_iterations,
             task_goal_global=task_goal_global,
-            reference_trajectory=reference_trajectory
+            reference_trajectory=reference_trajectory,
+            shoulder_trajectory=shoulder_trajectory
         )
 
     print(f"\nMethod 3 completed: Final Score={score_history_hybrid[-1]:.4f}, Points={len(trajectory_hand_hybrid)}")
@@ -2305,7 +1888,8 @@ if __name__ == '__main__':
         trajectory_hand_ergo, score_history_ergo, joint_history_ergo,
         trajectory_hand_sdf, score_history_sdf, joint_history_sdf, sdf_values,
         trajectory_hand_hybrid, score_history_hybrid, joint_history_hybrid, sdf_values_hybrid, weights_history_hybrid,
-        reference_trajectory, task_goal_global
+        reference_trajectory, task_goal_global,
+        shoulder_trajectory=shoulder_trajectory
     )
 
     print("\n" + "=" * 70)
