@@ -1,7 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D
-import main_opt_static as mos
+from iros2025_code import main_opt_static as mos
 import transformation as tsf
 import utils
 

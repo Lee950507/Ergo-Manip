@@ -4,29 +4,15 @@ import math
 import matplotlib.pyplot as plt
 import utils
 import transformation as tsf
-import main_opt_static as mos
+from iros2025_code import main_opt_static as mos
 
-from mpl_toolkits.mplot3d import Axes3D
-from matplotlib.animation import FuncAnimation, PillowWriter
-from scipy.spatial.transform import Rotation as R
 from scipy.optimize import minimize, differential_evolution
-from itertools import product
-from matplotlib.colors import Normalize
-from matplotlib.cm import ScalarMappable, get_cmap
 from scipy.interpolate import CubicSpline
 from scipy.spatial import KDTree
 from scipy.ndimage import gaussian_filter1d
 
 import sys
-import os
-import signal
 import subprocess
-import time
-
-import tkinter as tk
-from tkinter import messagebox
-
-from utils import plot_skeleton
 
 
 def plot_right_upper_limb_skeleton(ax, global_positions, color='gray', linewidth=3):
@@ -609,7 +595,8 @@ class TrajectorySDFField:
         return tangent
 
 
-def generate_reference_trajectory(start_pos, goal_pos, num_points=50, trajectory_type='straight'):
+def generate_reference_trajectory(start_pos, goal_pos, num_points=50, trajectory_type='straight',
+                                  transition_radius_ratio=0.15):
     """
     Generate reference trajectory
 
@@ -617,11 +604,15 @@ def generate_reference_trajectory(start_pos, goal_pos, num_points=50, trajectory
     - start_pos: start position [3,]
     - goal_pos: goal position [3,]
     - num_points: number of trajectory points
-    - trajectory_type: 'straight' or 'curved'
+    - trajectory_type: 'straight', 'curved', or 'box_carrying'
+    - transition_radius_ratio: for 'box_carrying', arc radius = ratio * horizontal_dist (default 0.15)
 
     Returns:
     - trajectory: reference trajectory [N, 3]
     """
+    start_pos = np.asarray(start_pos).ravel()[:3]
+    goal_pos = np.asarray(goal_pos).ravel()[:3]
+
     if trajectory_type == 'straight':
         # Linear interpolation
         trajectory = np.linspace(start_pos, goal_pos, num_points)
@@ -643,10 +634,47 @@ def generate_reference_trajectory(start_pos, goal_pos, num_points=50, trajectory
                      np.outer(2 * (1 - t) * t, control_point) + \
                      np.outer(t ** 2, goal_pos)
 
-    else:
-        raise ValueError(f"Unknown trajectory type: {trajectory_type}")
+    elif trajectory_type == 'box_carrying':
+        # Horizontal in XY to above goal, then smooth transition (quarter-circle arc) and descent to goal.
+        above_goal = np.array([goal_pos[0], goal_pos[1], start_pos[2]])
+        horiz_dist = np.linalg.norm(above_goal - start_pos)
+        vert_dist = abs(goal_pos[2] - start_pos[2])
+        r = transition_radius_ratio * horiz_dist
+        r = np.clip(r, 0.01, min(horiz_dist * 0.5, max(vert_dist * 0.5, 0.02)))
 
-    return trajectory
+        if horiz_dist < 1e-6:
+            trajectory = np.linspace(start_pos, goal_pos, num_points)
+        else:
+            u_h = (above_goal - start_pos) / horiz_dist
+            e_z = np.array([0.0, 0.0, 1.0])
+            Q1 = above_goal - r * u_h
+            Q2 = above_goal - r * e_z
+
+            n_h = max(2, int(num_points * 0.4))
+            n_arc = max(3, int(num_points * 0.25))
+            n_v = max(2, num_points - n_h - n_arc)
+
+            seg1 = np.linspace(start_pos, Q1, n_h)
+            theta = np.linspace(0, np.pi / 2, n_arc)
+            center = above_goal
+            seg2 = center - r * np.outer(np.cos(theta), u_h) - r * np.outer(np.sin(theta), e_z)
+            seg3 = np.linspace(Q2, goal_pos, n_v)
+
+            trajectory = np.vstack([seg1, seg2, seg3])
+            if trajectory.shape[0] != num_points:
+                t_orig = np.linspace(0, 1, len(trajectory))
+                t_new = np.linspace(0, 1, num_points)
+                trajectory = np.column_stack([
+                    np.interp(t_new, t_orig, trajectory[:, 0]),
+                    np.interp(t_new, t_orig, trajectory[:, 1]),
+                    np.interp(t_new, t_orig, trajectory[:, 2])
+                ])
+
+    else:
+        raise ValueError(f"Unknown trajectory type: {trajectory_type}. "
+                        f"Use one of: straight, curved, box_carrying")
+
+    return np.asarray(trajectory)
 
 
 def generate_shoulder_reference_trajectory(shoulder_center, num_points, amplitude_x=0.02, amplitude_y=0.02,
@@ -732,44 +760,56 @@ def ik_target_point(hand_target_global, shoulder, q_init, d_uar, d_lar, joint_an
 
 
 def compute_ergonomic_vector_task_space(endpoint_global, shoulder, q_current, d_uar, d_lar,
-                                        joint_angle_bounds, neighbor_radius=0.02, n_samples=27):
+                                        joint_angle_bounds, neighbor_radius=0.02, n_samples=27,
+                                        joint_neighbor_radius=0.06):
     """
-    In task space, define a neighbor range around current endpoint; find the point in this
-    range that has the lowest ergo score (by IK then ergo(q)); return the direction from
-    endpoint to that point as the ergonomic vector.
+    In joint space, sample neighbors of q_current; find the q with lowest ergo score (optimal_q),
+    then map to task space to get the corresponding wrist position; return the direction from
+    current endpoint to that position as the ergonomic vector.
 
     Returns:
-    - ergo_direction: [3,] normalized vector pointing toward lowest-ergo point in neighborhood,
-      or zero vector if no valid point found.
+    - ergo_direction: [3,] normalized vector pointing toward task-space position of optimal_q,
+      or zero vector if no valid neighbor found.
     """
-    # Sample points in a ball around endpoint (grid on cube then filter to ball, or random)
-    samples = []
-    for _ in range(n_samples):
-        u = np.random.randn(3)
-        u = u / (np.linalg.norm(u) + 1e-8)
-        r = neighbor_radius * (np.random.rand() ** (1 / 3))
-        p = endpoint_global + r * u
-        samples.append(p)
+    q_current = np.asarray(q_current)
+    ndof = len(q_current)
 
+    # 1. Sample joint-space neighbors of q_current (random perturbations, then clip to bounds)
+    neighbors_q = []
+    for _ in range(n_samples):
+        # Random direction in joint space, radius scaled by joint_neighbor_radius
+        u = np.random.randn(ndof)
+        u = u / (np.linalg.norm(u) + 1e-8)
+        r = joint_neighbor_radius * (np.random.rand() ** (1 / ndof))
+        q_neighbor = q_current + r * u
+        # Clip to joint limits
+        for i in range(ndof):
+            low, high = joint_angle_bounds[i]
+            q_neighbor[i] = np.clip(q_neighbor[i], low, high)
+        neighbors_q.append(q_neighbor)
+
+    # 2. Find optimal_q: neighbor with lowest ergonomic score
     best_score = np.inf
-    best_point = None
-    for p_global in samples:
-        q, pos_err = ik_target_point(p_global, shoulder, q_current, d_uar, d_lar,
-                                     joint_angle_bounds, maxiter=50, ftol=1e-6)
-        if pos_err > 0.02:
-            continue
+    optimal_q = None
+    for q in neighbors_q:
         score = utils.calculate_upper_limb_score_with_joint_angles(q)
         if score < best_score:
             best_score = score
-            best_point = p_global.copy()
+            optimal_q = q.copy()
 
-    if best_point is None:
+    if optimal_q is None:
         return np.zeros(3)
-    delta = best_point - endpoint_global
-    norm = np.linalg.norm(delta)
+
+    # 3. Map optimal_q to task space (wrist position in global frame)
+    _, hand_shoulder = mos.forward_kinematics(optimal_q, d_uar, d_lar)
+    pos_optimal = trans_shoulder2global(hand_shoulder, shoulder, arm='right')
+
+    # 4. Ergonomic vector: from current endpoint toward optimal position
+    vector_ergo = pos_optimal - endpoint_global
+    norm = np.linalg.norm(vector_ergo)
     if norm < 1e-6:
         return np.zeros(3)
-    return delta / norm
+    return vector_ergo / norm
 
 
 def run_iterations_task_space_direct(num_iterations, task_goal_global, reference_trajectory=None,
@@ -1203,7 +1243,7 @@ def run_iterations_with_hybrid_guidance(num_iterations, task_goal_global, refere
         num_iterations, task_goal_global,
         reference_trajectory=reference_trajectory,
         shoulder_trajectory=shoulder_trajectory,
-        w_goal=0.25, w_ref=0.4, w_ergo=0.35,
+        w_goal=0.45, w_ref=0.25, w_ergo=0.3,
         method_name='Hybrid',
         goal_threshold=0.01, step_size=0.04,
         neighbor_radius=0.02, n_ergo_samples=27,
@@ -1733,7 +1773,7 @@ if __name__ == '__main__':
     # skeleton_joint_name, skeleton_joints, skeleton_parent_indices, skeleton_joint_local_translation = \
     #     utils.read_skeleton_motion('/home/clover/Chenzui/Ergo-Manip/data/demo_2_test_chenzui_only_optitrack2hotu.npy')
     skeleton_joint_name, skeleton_joints, skeleton_parent_indices, skeleton_joint_local_translation = \
-        utils.read_skeleton_motion('/home/lee/Ergo-Manip/data/demo_2_test_chenzui_only_optitrack2hotu.npy')
+        utils.read_skeleton_motion('/home/clover/Chenzui/Ergo-Manip/data/demo_2_test_chenzui_only_optitrack2hotu.npy')
     skeleton_joint = skeleton_joints[500, :]
     global_positions, global_rotations = utils.forward_kinematics(skeleton_joint_local_translation,
                                                                   skeleton_joint, skeleton_parent_indices)

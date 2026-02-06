@@ -1,9 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import os
-from mpl_toolkits.mplot3d import Axes3D
 import utils
-import main_opt_static as mos
 from matplotlib.colors import LinearSegmentedColormap
 
 

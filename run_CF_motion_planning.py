@@ -4,19 +4,17 @@ import math
 import matplotlib.pyplot as plt
 import utils
 import transformation as tsf
-import main_opt_static as mos
+from iros2025_code import main_opt_static as mos
 import message_filters
 
-from mpl_toolkits.mplot3d import Axes3D
-from matplotlib.animation import FuncAnimation, PillowWriter
-from scipy.spatial.transform import Rotation as R
 from itertools import product
 from matplotlib.colors import Normalize
-from matplotlib.cm import ScalarMappable, get_cmap
 from geometry_msgs.msg import PoseStamped
 from scipy.interpolate import CubicSpline
+from scipy.spatial import KDTree
 
 from EMGProcessor import EMGProcessor
+import motion_planning_composite_filed_moving_base_ros as cf_plan
 
 import sys
 import os
@@ -26,15 +24,6 @@ import subprocess
 import time
 import queue
 import threading
-import pickle
-import traceback
-import argparse
-from keras.models import load_model
-
-import tkinter as tk
-from tkinter import messagebox
-
-from utils import plot_skeleton
 
 # 获取 ROS 工作空间的路径
 workspace_path = '/home/clover/catkin_ws'
@@ -276,314 +265,15 @@ def generate_trajectory_with_speed_limit(waypoints, speed_limit, t_total, t_samp
     return full_trajectory
 
 
-def update(frame):
-    global current_q, global_positions, trajectory_hand, trajectory_elbow
-    ax.clear()
-    ax.set_xlim((0.7, 2.2))
-    ax.set_ylim((-0.7, 0.8))
-    ax.set_zlim((0.0, 1.5))
-    # ax.set_xlim((-0.5, 0.1))
-    # ax.set_ylim((0, 0.6))
-    # ax.set_zlim((0.9, 1.5))
-
-    ax.view_init(elev=30, azim=-30)
-
-    new_bounds = compress_bounds(joint_angle_bounds, current_q, compression_factor=comp_factor)
-    joint_angle_ranges = [np.linspace(lower, upper, num_samples_per_joint) for lower, upper in new_bounds]
-
-    q_combinations = np.array(list(product(*joint_angle_ranges)))
-
-    scores = []
-    candidate_elbows = []
-    candidate_hands = []
-
-    for q in q_combinations:
-        elbow_cand, hand_cand = mos.forward_kinematics(q, d_uar, d_lar)
-        hand_cand = trans_shoulder2global(hand_cand, shoulder, arm='right')
-        elbow_cand = trans_shoulder2global(elbow_cand, shoulder, arm='right')
-
-        candidate_elbows.append(elbow_cand)
-        candidate_hands.append(hand_cand)
-        s = utils.calculate_upper_limb_score_with_joint_angles(q)
-        scores.append(s)
-
-    scores = np.array(scores)
-    candidate_elbows = np.array(candidate_elbows)
-    candidate_hands = np.array(candidate_hands)
-
-    norm_obj = Normalize(vmin=scores.min(), vmax=scores.max())
-    cmap = plt.get_cmap('coolwarm')
-    colors = cmap(norm_obj(scores))
-    # ax.scatter(candidate_hands[:, 0], candidate_hands[:, 1], candidate_hands[:, 2],
-    #            c=colors, s=5, alpha=0.5)
-
-    # ref_point = global_positions[8]
-    ref_point = global_positions[5]
-
-    ## Find the neighbor with the lowest ergo score
-
-    target_idx = np.argmin(scores)
-    candidate_q = q_combinations[target_idx]
-
-    new_elbow = candidate_elbows[target_idx]
-    new_hand = candidate_hands[target_idx]
-
-    dist = np.linalg.norm(new_hand - ref_point)
-    if dist > max_disp:
-        ratio = max_disp / dist
-    else:
-        ratio = 1.0
-
-    new_q = current_q + ratio * (candidate_q - current_q)
-
-    ## Find the neighbor pointing to the optimal point
-
-    # A = ref_point
-    # B = optimal_position
-    # expected_p = A + frame * (B - A) / 20
-    #
-    # candidate_expected_dists = np.linalg.norm(candidate_hands - expected_p, axis=1)
-    # target_idx = np.argmin(candidate_expected_dists)
-    # candidate_q = q_combinations[target_idx]
-    # candidate_hand = candidate_hands[target_idx]
-    # candidate_elbow = candidate_elbows[target_idx]
-    #
-    # # 计算从当前手腕到选择候选点的位移
-    # disp = candidate_hand - ref_point
-    # dist = np.linalg.norm(disp)
-    # if dist > max_disp:
-    #     ratio = max_disp / dist
-    # else:
-    #     ratio = 1.0
-    #
-    # # 在关节空间中按比例线性插值更新配置
-    # new_q = current_q + ratio * (candidate_q - current_q)
-
-    new_elbow, new_hand = mos.forward_kinematics(new_q, d_uar, d_lar)
-    new_hand = trans_shoulder2global(new_hand, shoulder, arm='right')
-    new_elbow = trans_shoulder2global(new_elbow, shoulder, arm='right')
-
-    current_q = new_q
-
-    s = utils.calculate_upper_limb_score_with_joint_angles(current_q)
-    score_history.append(s)
-
-    # global_positions[7] = new_elbow
-    # global_positions[8] = new_hand
-    global_positions[4] = new_elbow
-    global_positions[5] = new_hand
-
-    # 将新位置加入轨迹（便于绘制轨迹）
-    trajectory_hand.append(new_hand.copy())
-    trajectory_elbow.append(new_elbow.copy())
-    joint_history.append(new_q.copy())
-
-    # ---------------------- 绘制部分 ----------------------
-    # 绘制肩部、肘部、手腕点（用不同颜色标记），以及轨迹
-    ax.scatter(shoulder[0], shoulder[1], shoulder[2], c='black', s=50, label='Shoulder')
-    ax.scatter(new_elbow[0], new_elbow[1], new_elbow[2], c='blue', s=50, label='Elbow')
-    ax.scatter(new_hand[0], new_hand[1], new_hand[2], c='green', s=50, label='Hand')
-
-    # 绘制轨迹（手腕轨迹）
-    traj = np.array(trajectory_hand)
-    ax.plot(traj[:, 0], traj[:, 1], traj[:, 2], c='green', linestyle='--')
-
-    # 绘制从肩部到手腕的连线，模拟手臂
-    ax.plot([shoulder[0], new_elbow[0], new_hand[0]],
-            [shoulder[1], new_elbow[1], new_hand[1]],
-            [shoulder[2], new_elbow[2], new_hand[2]], c='red', linewidth=2)
-
-    # 绘制参考最优位置（optimal_position，供对比）
-    ax.scatter(optimal_position[0], optimal_position[1], optimal_position[2],
-               c='magenta', s=50, label='Optimal Position')
-
-    utils.plot_skeleton(ax, global_positions, skeleton_parent_indices, color='black')
-
-    # 设定坐标轴标签与标题
-    ax.set_xlabel('X Position')
-    ax.set_ylabel('Y Position')
-    ax.set_zlabel('Z Position')
-    ax.set_title(f'Iteration {frame + 1}')
-    ax.legend()
-
-
-def run_iterations(num_iterations):
-    global current_q, global_positions, trajectory_hand, trajectory_elbow, score_history, joint_history
-
-    # 定义CSEF场所需参数
-    q_opt = optimal_q  # 最优关节角度配置
-    weights = np.array([1.0, 1.0, 1.0, 2.0])  # 关节角度权重
-    comfort_threshold = 0.1  # 舒适阈值
-    alpha = 0.7  # 目标吸引力权重
-    beta = 0.3  # 人体工学舒适度权重
-    step_size = 0.05  # 步长
-
-    # 用于保存结果的数组
-    trajectory = []
-    q_current = current_q.copy()
-    q_goal = optimal_q.copy()  # 目标关节角度配置
-
-    print("Planning trajectory using CSEF guidance...")
-
-    # 计算SEF值 (Signed Ergonomics Field)
-    def calculate_sef(q, q_opt, weights, comfort_threshold):
-        ergo_score = utils.calculate_upper_limb_score_with_joint_angles(q)
-        score_history.append(ergo_score)
-        return ergo_score - comfort_threshold
-
-    # 计算SEF梯度 (方向指向不舒适度增加的方向)
-    def calculate_sef_gradient(q, q_opt, weights, comfort_threshold, delta=1e-6):
-        grad = np.zeros_like(q)
-        sef_q = calculate_sef(q, q_opt, weights, comfort_threshold)
-
-        for i in range(len(q)):
-            q_plus = q.copy()
-            q_plus[i] += delta
-            sef_plus = calculate_sef(q_plus, q_opt, weights, comfort_threshold)
-            grad[i] = (sef_plus - sef_q) / delta
-
-        return grad
-
-    # 确保关节角度在限制范围内
-    def enforce_joint_limits(q, bounds):
-        q_limited = np.copy(q)
-        for i in range(len(q)):
-            q_limited[i] = max(bounds[i][0], min(bounds[i][1], q[i]))
-        return q_limited
-
-    # 添加初始位置到轨迹
-    trajectory.append(q_current)
-
-    # 主循环：使用CSEF指导的梯度下降
-    for step in range(num_iterations):
-        # 计算指向目标的向量
-        goal_direction = q_goal - q_current
-        goal_distance = np.linalg.norm(goal_direction)
-
-        # 如果足够接近目标，结束轨迹
-        if goal_distance < 0.05:
-            trajectory.append(q_goal)
-            break
-
-        # 归一化目标方向
-        if goal_distance > 0:
-            goal_direction = goal_direction / goal_distance
-
-        # 获取SEF梯度（不舒适度增加的方向）
-        sef_gradient = calculate_sef_gradient(q_current, q_opt, weights, comfort_threshold)
-        sef_gradient_norm = np.linalg.norm(sef_gradient)
-
-        # 归一化SEF梯度（如果非零）
-        if sef_gradient_norm > 0:
-            sef_gradient = sef_gradient / sef_gradient_norm
-
-        # 组合目标方向和负SEF梯度（朝向更舒适的方向）
-        combined_direction = alpha * goal_direction - beta * sef_gradient
-        combined_norm = np.linalg.norm(combined_direction)
-
-        if combined_norm > 0:
-            # 归一化并移动一步
-            combined_direction = combined_direction / combined_norm
-            q_next = q_current + step_size * combined_direction
-        else:
-            # 如果方向相互抵消，优先考虑目标方向
-            q_next = q_current + step_size * goal_direction
-
-        # 确保关节角度在限制范围内
-        q_next = enforce_joint_limits(q_next, joint_angle_bounds)
-
-        # 使用前向运动学计算新的手肘和手腕位置
-        new_elbow, new_hand = mos.forward_kinematics(q_next, d_uar, d_lar)
-        new_hand = trans_shoulder2global(new_hand, shoulder, arm='right')
-        new_elbow = trans_shoulder2global(new_elbow, shoulder, arm='right')
-
-        # 添加到轨迹并更新当前位置
-        trajectory.append(q_next)
-        q_current = q_next
-        joint_history.append(q_next.copy())
-
-        # 更新全局位置数组
-        global_positions[4] = new_elbow
-        global_positions[5] = new_hand
-
-        # 将新位置添加到手腕和肘部轨迹
-        trajectory_hand.append(new_hand.copy())
-        trajectory_elbow.append(new_elbow.copy())
-
-        # 自适应步长：接近目标时减小
-        step_size = min(0.05, goal_distance * 0.2)
-
-        print(f"Iteration {step + 1}/{num_iterations} completed. Current score: {score_history[-1]:.4f}")
-
-    # 设置最终配置为当前配置
-    current_q = q_current
-
-    # 迭代完成后绘制最终结果
-    ax.set_xlim((0.7, 2.2))
-    ax.set_ylim((-0.7, 0.8))
-    ax.set_zlim((0.0, 1.5))
-    ax.view_init(elev=30, azim=-30)
-
-    # 获取最终位置
-    new_elbow = global_positions[4]
-    new_hand = global_positions[5]
-
-    # 绘制肩部、肘部、手腕点（用不同颜色标记），以及轨迹
-    ax.scatter(shoulder[0], shoulder[1], shoulder[2], c='black', s=50, label='Shoulder')
-    ax.scatter(new_elbow[0], new_elbow[1], new_elbow[2], c='blue', s=50, label='Elbow')
-    ax.scatter(new_hand[0], new_hand[1], new_hand[2], c='green', s=50, label='Hand')
-
-    # 绘制轨迹（手腕轨迹）
-    traj = np.array(trajectory_hand)
-    ax.plot(traj[:, 0], traj[:, 1], traj[:, 2], c='green', linestyle='--')
-
-    # 绘制从肩部到手腕的连线，模拟手臂
-    ax.plot([shoulder[0], new_elbow[0], new_hand[0]],
-            [shoulder[1], new_elbow[1], new_hand[1]],
-            [shoulder[2], new_elbow[2], new_hand[2]], c='red', linewidth=2)
-
-    # 绘制参考最优位置（optimal_position，供对比）
-    ax.scatter(optimal_position[0], optimal_position[1], optimal_position[2],
-               c='magenta', s=50, label='Optimal Position')
-
-    utils.plot_skeleton(ax, global_positions, skeleton_parent_indices, color='black')
-
-    # 设定坐标轴标签与标题
-    ax.set_xlabel('X Position')
-    ax.set_ylabel('Y Position')
-    ax.set_zlabel('Z Position')
-    ax.set_title(f'Final Result after {num_iterations} Iterations (CSEF Method)')
-    ax.legend()
-
-    plt.show()
-
-    # 绘制分数历史趋势图
-    plt.figure(figsize=(10, 6))
-    plt.plot(range(1, len(score_history) + 1), score_history)
-    plt.xlabel('Iteration')
-    plt.ylabel('Ergonomic Score')
-    plt.title('Ergonomic Score History (CSEF Method)')
-    plt.grid(True)
-    plt.show()
-
-    # 可选：绘制SEF值历史趋势
-    sef_values = [score - comfort_threshold for score in score_history]
-    plt.figure(figsize=(10, 6))
-    plt.plot(range(1, len(sef_values) + 1), sef_values)
-    plt.axhline(y=0, color='r', linestyle='--', label='Comfort Threshold')
-    plt.xlabel('Iteration')
-    plt.ylabel('SEF Value')
-    plt.title('Signed Ergonomics Field Values (CSEF Method)')
-    plt.grid(True)
-    plt.legend()
-    plt.show()
-
-    return trajectory_hand, trajectory_elbow, joint_history, score_history
-
-
+latest_robot_msg = None
 latest_shouR_msg = None
 latest_elbowR_msg = None
 latest_wristR_msg = None
+
+
+def robot_callback(msg):
+    global latest_robot_msg
+    latest_robot_msg = msg
 
 
 def shouR_callback(msg):
@@ -602,13 +292,14 @@ def wristR_callback(msg):
 
 
 def setup_subscribers():
+    rospy.Subscriber('/vrpn_client_node/robot/pose', PoseStamped, robot_callback)
     rospy.Subscriber('/vrpn_client_node/shouR/pose', PoseStamped, shouR_callback)
     rospy.Subscriber('/vrpn_client_node/elbowR/pose', PoseStamped, elbowR_callback)
     rospy.Subscriber('/vrpn_client_node/wristR/pose', PoseStamped, wristR_callback)
 
 
 if __name__ == '__main__':
-    rospy.init_node('vf_hrc')
+    rospy.init_node('cf_hrc')
     signal.signal(signal.SIGINT, signal_handler)
     # 启动 roslaunch
     roslaunch_process = launch_roslaunch()
@@ -622,7 +313,7 @@ if __name__ == '__main__':
     vrpn_roslaunch_process = vrpn_launch_roslaunch()
 
     ## Initialization of robot end effector poses
-    robot_left_position_init = np.array([0.85, 0.2, 1.25])
+    robot_left_position_init = np.array([0.85, -0.1, 1.35])
     robot_right_position_init = np.array([0.85, -0.25, 0.85])
 
     robot_left_rotation_matrix_init = np.array([[1, 0, 0], [0, 0, -1], [0, 1, 0]])
@@ -656,7 +347,7 @@ if __name__ == '__main__':
     subscriber_elbowR = rospy.wait_for_message('/vrpn_client_node/elbowR/pose', PoseStamped)
     # subscriber_wristL = rospy.wait_for_message('/vrpn_client_node/wristL/pose', PoseStamped)
     subscriber_wristR = rospy.wait_for_message('/vrpn_client_node/wristR/pose', PoseStamped)
-    print("collecting human data successfully!")
+    print("Optitrack data collected successfuldataly!")
 
     sub_robot = transform_to_pose(subscriber_robot)
     # sub_shouL = transform_to_pose(subscriber_shouL)
@@ -665,14 +356,6 @@ if __name__ == '__main__':
     sub_elbowR = transform_to_pose(subscriber_elbowR)
     # sub_wristL = transform_to_pose(subscriber_wristL)
     sub_wristR = transform_to_pose(subscriber_wristR)
-
-    # sub_robot = np.array([-0.2195, 1.11462, 0, 0, 0, 0, 1])
-    # sub_shouL = np.array([2, 1.5, 0.25, 0, 0, 0, 1])
-    # sub_shouR = np.array([2, 1.5, -0.25, 0, 0, 0, 1])
-    # sub_elbowL = np.array([1.9, 1.3, 0.3, 0, 0, 0, 1])
-    # sub_elbowR = np.array([1.9, 1.3, -0.3, 0, 0, 0, 1])
-    # sub_wristL = np.array([1.8, 1.2, 0.3, 0, 0, 0, 1])
-    # sub_wristR = np.array([1.8, 1.4, -0.3, 0, 0, 0, 1])
 
     T_optitrack2robotbase = np.linalg.inv(
         tsf.transform_optitrack_origin_to_optitrack_robot(
@@ -742,102 +425,84 @@ if __name__ == '__main__':
     score_history = []
     joint_history = []
 
-    # 设置候选离散采样数、压缩系数和迭代次数
-    num_samples_per_joint = 15
-    comp_factor = 0.1
-    num_iterations = 80
-    max_disp = 0.02  # maximum allowed displacement per iteration in global (hand) space
+    # 规划方法选择: 0=Straight(对照组), 1=TSEF, 2=SDF, 3=CF（每次运行只验证一种，通过环境变量 PLANNING_METHOD 设置）
+    PLANNING_METHOD = int(os.environ.get('PLANNING_METHOD', 3))
+    method_names = {0: 'Straight', 1: 'TSEF', 2: 'HD-SDF', 3: 'CF'}
+    print("Using planning method: {} ({})".format(PLANNING_METHOD, method_names.get(PLANNING_METHOD, 'Unknown')))
 
-    fig = plt.figure()
-    ax = fig.add_subplot(111, projection='3d')
-    # ---------------------- 动画启动 ----------------------
-    # anim = FuncAnimation(fig, update, frames=num_iterations, interval=800, repeat=False)
-    # anim.save("/home/ubuntu/Ergo-Manip/vector_field/figs/animation_left_arm_straight.gif", writer=PillowWriter(fps=2))
-    # plt.show()
+    task_goal_global = np.array([1.15, 0.4, 1.05])
+    reference_trajectory = None
+    ref_kdtree = None
+    if PLANNING_METHOD in (2, 3):
+        reference_trajectory = cf_plan.generate_reference_trajectory(
+            task_goal_global + np.array([0.0, 0.0, 0.3]), task_goal_global, num_points=100, trajectory_type='straight')
+        ref_kdtree = KDTree(reference_trajectory) if reference_trajectory is not None else None
 
-    trajectory_hand, trajectory_elbow, joint_history, score_history = run_iterations(num_iterations)
+    # 0=对照组直线规划(w_goal=1); 1=TSEF; 2=HD-SDF; 3=CF
+    if PLANNING_METHOD == 0:
+        w_goal, w_ref, w_ergo = 1.0, 0.0, 0.0
+    elif PLANNING_METHOD == 1:
+        w_goal, w_ref, w_ergo = 0.6, 0.0, 0.4
+    elif PLANNING_METHOD == 2:
+        w_goal, w_ref, w_ergo = 0.40, 0.60, 0.0
+    else:
+        w_goal, w_ref, w_ergo = 0.45, 0.25, 0.30
 
-    # 在这里添加你想在迭代完成后执行的代码
-    print("Iterations completed. Continuing with next steps...")
-
-    # 首先对轨迹进行平滑处理
-    print("平滑处理轨迹...")
-    smoothed_trajectory_hand = smooth_trajectory(np.array(trajectory_hand), smoothing_factor=0.8, iterations=5)
-
-    waypoints_ergo = smoothed_trajectory_hand
-    waypoints_straight = np.array([smoothed_trajectory_hand[0], smoothed_trajectory_hand[-1]])
-
-    speed_limit = 0.05  # 最大速度限制
-    t_total = 8  # 总时间
-    t_sample = 0.0025  # 采样时间间隔
-
-    # 生成平滑轨迹
-    print("生成平滑轨迹...")
-    trajectory_positions_ergo = generate_smooth_trajectory(waypoints_ergo, speed_limit, t_total, t_sample)
-    trajectory_positions_straight = generate_smooth_trajectory(waypoints_straight, speed_limit, t_total, t_sample)
-
-    # 可视化轨迹平滑度
-    plt.figure(figsize=(12, 5))
-    plt.subplot(1, 3, 1)
-    plt.plot(trajectory_positions_ergo[:, 0], label='X')
-    plt.title('X Position')
-    plt.grid(True)
-
-    plt.subplot(1, 3, 2)
-    plt.plot(trajectory_positions_ergo[:, 1], label='Y')
-    plt.title('Y Position')
-    plt.grid(True)
-
-    plt.subplot(1, 3, 3)
-    plt.plot(trajectory_positions_ergo[:, 2], label='Z')
-    plt.title('Z Position')
-    plt.grid(True)
-
-    plt.tight_layout()
-    plt.show()
-
-    # 计算相对于初始位置的位移
-    # position_ergo = trajectory_positions_ergo - trajectory_positions_ergo[0]
-    position_ergo = trajectory_positions_straight - trajectory_positions_straight[0]
+    max_plan_steps = 1000
+    goal_threshold = 0.01
+    step_size = 0.04
+    control_dt = 0.01
+    # 位移平滑：每步最大变化量（米/轴），避免底层力矩变化率过大
+    max_displacement_delta_per_step = 0.004  # 4mm per axis per step
+    displacement_cmd = np.zeros(3)  # 实际下发的位移（平滑后）
+    # 运动方向滤波：对规划得到的 unit direction 做 EMA，避免 cmd 方向跳变（method 2/3 接近 ref 时易突变）
+    motion_direction_smooth_alpha = 0.65  # 越大方向越平滑、跟踪越慢
+    motion_direction_smooth = None
+    # 参考轨迹向量平滑：接近 ref 时最近点会跳变，对 ref_vec 做 EMA 过渡
+    ref_vec_smooth = None
+    ref_vec_smooth_alpha = 0.55  # 越大 ref 方向越平滑
+    # 接近 reference 时的过渡：距离 < ref_transition_dist 时逐渐减弱 ref 权重，避免突变
+    ref_transition_dist = 0.025  # 25mm 内线性减弱 ref 权重
+    ref_transition_dist_zero = 0.012  # 12mm 内 ref 权重为 0，完全由 goal/ergo 主导
+    # OptiTrack 输入平滑：指数移动平均，减弱抖动对规划与位移输出的影响
+    optitrack_smooth_alpha = 0.8  # 越大平滑越强、延迟越大，建议 0.5~0.8
+    shouR_position_smooth = None
+    elbowR_position_smooth = None
+    wristR_position_smooth = None
+    # 机器人 cmd position 平滑：对下发的末端位置做 EMA，避免 motion direction 跳变、减轻力矩变化率
+    robot_cmd_smooth_alpha = 0.7  # 越大平滑越强、跟踪越慢，建议 0.5~0.8
+    robot_left_position_smooth = None
 
     print("left_arm_current", curi.get_tcp(0))
     print("right_arm_current", curi.get_tcp(1))
 
-
     # 等待一些初始消息到达
     print("Waiting for initial pose messages...")
     start_time = rospy.Time.now()
-    while (latest_shouR_msg is None or latest_elbowR_msg is None or latest_wristR_msg is None) and \
+    while (latest_robot_msg is None or latest_shouR_msg is None or latest_elbowR_msg is None or latest_wristR_msg is None) and \
             (rospy.Time.now() - start_time).to_sec() < 3.0:  # 5秒超时
         time.sleep(0.1)
 
-    if latest_shouR_msg is None or latest_elbowR_msg is None or latest_wristR_msg is None:
+    if latest_robot_msg is None or latest_shouR_msg is None or latest_elbowR_msg is None or latest_wristR_msg is None:
         rospy.logwarn("Not all initial pose messages received. Proceeding anyway.")
 
-    # 记录位置数据
     recorded_shoulder_positions = []
     recorded_elbow_positions = []
     recorded_wrist_positions = []
     recorded_timestamps = []
+    optimized_robot_positions = []
+    planned_motion_directions = []  # 每步规划的 motion direction (unit vector), 保存为 npy
 
     setup_subscribers()
 
-    folder = '/home/clover/Chenzui/Ergo-Manip/data/drilling/0921/wuxi/2.3'
+    folder = '/home/clover/Chenzui/Ergo-Manip/data/composite_field/0204/chenzui/8_3'
     os.makedirs(folder, exist_ok=True)
     start_time = time.time()
     emg_processor = EMGProcessor(channel_num=5, sample_fre=200, start_time=start_time, save=True, save_folder=folder)
     data_queue = queue.Queue()
     threads = [
-        threading.Thread(
-            target=emg_processor.read_emg,
-            args=(data_queue,),
-            name="EMG-Reader"
-        ),
-        threading.Thread(
-            target=emg_processor.process_emg,
-            args=(data_queue,),
-            name="EMG-Processor"
-        )
+        threading.Thread(target=emg_processor.read_emg, args=(data_queue,), name="EMG-Reader"),
+        threading.Thread(target=emg_processor.process_emg, args=(data_queue,), name="EMG-Processor")
     ]
     for t in threads:
         t.daemon = True
@@ -845,47 +510,150 @@ if __name__ == '__main__':
     time.sleep(10.0)
     print("EMG processor initialized")
 
-    print(f"开始执行轨迹，共{len(position_ergo)}个点...")
-    for i in range(len(position_ergo)):
+    print("start robot executing...")
+    for step in range(max_plan_steps):
+        if not (latest_robot_msg and latest_shouR_msg and latest_elbowR_msg and latest_wristR_msg):
+            time.sleep(0.01)
+            continue
+        sub_robot = transform_to_pose(latest_robot_msg)
+        sub_shouR = transform_to_pose(latest_shouR_msg)
+        sub_elbowR = transform_to_pose(latest_elbowR_msg)
+        sub_wristR = transform_to_pose(latest_wristR_msg)
+        T_optitrack2robotbase = np.linalg.inv(
+            tsf.transform_optitrack_origin_to_optitrack_robot(
+                sub_robot) @ tsf.transform_optitrack_robot_to_robot_base())
+        shouR_position = T_optitrack2robotbase[:3, :3] @ sub_shouR[:3] + T_optitrack2robotbase[:3, 3]
+        elbowR_position = T_optitrack2robotbase[:3, :3] @ sub_elbowR[:3] + T_optitrack2robotbase[:3, 3]
+        wristR_position = T_optitrack2robotbase[:3, :3] @ sub_wristR[:3] + T_optitrack2robotbase[:3, 3]
 
-        if i % 100 == 0:
-            print(f"执行到第{i}个点...")
+        # OptiTrack 数据指数移动平均平滑，减少抖动
+        if shouR_position_smooth is None:
+            shouR_position_smooth = shouR_position.copy()
+            elbowR_position_smooth = elbowR_position.copy()
+            wristR_position_smooth = wristR_position.copy()
+        else:
+            shouR_position_smooth = optitrack_smooth_alpha * shouR_position_smooth + (1 - optitrack_smooth_alpha) * shouR_position
+            elbowR_position_smooth = optitrack_smooth_alpha * elbowR_position_smooth + (1 - optitrack_smooth_alpha) * elbowR_position
+            wristR_position_smooth = optitrack_smooth_alpha * wristR_position_smooth + (1 - optitrack_smooth_alpha) * wristR_position
 
-        current_timestamp = rospy.Time.now()
+        recorded_shoulder_positions.append(shouR_position_smooth.copy())
+        recorded_elbow_positions.append(elbowR_position_smooth.copy())
+        recorded_wrist_positions.append(wristR_position_smooth.copy())
+        recorded_timestamps.append(time.time() - start_time)
 
-        # 使用最新可用的消息
-        if latest_shouR_msg and latest_elbowR_msg and latest_wristR_msg:
-            # 转换为位置数据
-            sub_shouR = transform_to_pose(latest_shouR_msg)
-            sub_elbowR = transform_to_pose(latest_elbowR_msg)
-            sub_wristR = transform_to_pose(latest_wristR_msg)
+        p_elbowR, p_wristR = trans_global2shoulder(shouR_position_smooth, elbowR_position_smooth, wristR_position_smooth, arm='right')
+        current_q = mos.inverse_kinematics(p_elbowR, p_wristR, d_uar, d_lar)
 
-            # 转换到机器人基座标系
-            shouR_position = T_optitrack2robotbase[:3, :3] @ sub_shouR[:3] + T_optitrack2robotbase[:3, 3]
-            elbowR_position = T_optitrack2robotbase[:3, :3] @ sub_elbowR[:3] + T_optitrack2robotbase[:3, 3]
-            wristR_position = T_optitrack2robotbase[:3, :3] @ sub_wristR[:3] + T_optitrack2robotbase[:3, 3]
+        endpoint = wristR_position_smooth.copy()
+        goal_dist = np.linalg.norm(task_goal_global - endpoint)
+        current_score = utils.calculate_upper_limb_score_with_joint_angles(current_q)
+        score_history.append(current_score)
+        joint_history.append(current_q.copy())
+        trajectory_hand.append(endpoint.copy())
 
-            # 记录位置数据
-            recorded_shoulder_positions.append(shouR_position.copy())
-            recorded_elbow_positions.append(elbowR_position.copy())
-            recorded_wrist_positions.append(wristR_position.copy())
-            # recorded_timestamps.append(current_timestamp.to_sec())
-            recorded_timestamps.append(time.time() - start_time)
+        if goal_dist < goal_threshold:
+            print("Reached goal at step {}".format(step))
+            optimized_robot_positions.append(endpoint.copy())
+            break
 
-        # 执行机器人控制代码
-        robot_left_position = robot_left_position_init + position_ergo[i]
+        goal_vec = task_goal_global - endpoint
+        if np.linalg.norm(goal_vec) > 1e-8:
+            goal_vec = goal_vec / np.linalg.norm(goal_vec)
+        else:
+            goal_vec = np.zeros(3)
+
+        ref_vec = np.zeros(3)
+        dist_to_ref = float('inf')
+        w_ref_effective = w_ref
+        if ref_kdtree is not None and w_ref > 0:
+            dist_to_ref, idx = ref_kdtree.query(endpoint, k=1)
+            dist_to_ref = np.atleast_1d(dist_to_ref)[0]
+            idx = np.atleast_1d(idx)[0]
+            closest_point = reference_trajectory[idx]
+            ref_vec_raw = closest_point - endpoint
+            if np.linalg.norm(ref_vec_raw) > 1e-8:
+                ref_vec = ref_vec_raw / np.linalg.norm(ref_vec_raw)
+            # 接近 reference 时的过渡：距离越近越减弱 ref 权重，避免最近点跳变导致 cmd 突变
+            if dist_to_ref < ref_transition_dist_zero:
+                w_ref_effective = 0.0
+            elif dist_to_ref < ref_transition_dist:
+                w_ref_effective = w_ref * (dist_to_ref - ref_transition_dist_zero) / (ref_transition_dist - ref_transition_dist_zero)
+            # ref_vec 时序平滑：与上一帧做 EMA，减轻最近点索引跳变带来的方向突变
+            if ref_vec_smooth is None:
+                ref_vec_smooth = ref_vec.copy()
+            else:
+                if np.linalg.norm(ref_vec) > 1e-8 and np.linalg.norm(ref_vec_smooth) > 1e-8:
+                    ref_vec_smooth = ref_vec_smooth_alpha * ref_vec_smooth + (1 - ref_vec_smooth_alpha) * ref_vec
+                    ref_norm = np.linalg.norm(ref_vec_smooth)
+                    if ref_norm > 1e-8:
+                        ref_vec_smooth = ref_vec_smooth / ref_norm
+                else:
+                    ref_vec_smooth = ref_vec.copy()
+            ref_vec = ref_vec_smooth
+
+        # Ergo vector: joint-space neighbors of current_q -> optimal_q -> FK to task space -> direction to that position
+        ergo_vec = np.zeros(3)
+        if w_ergo > 0:
+            ergo_vec = cf_plan.compute_ergonomic_vector_task_space(
+                endpoint, shouR_position_smooth, current_q, d_uar, d_lar, joint_angle_bounds,
+                n_samples=125, joint_neighbor_radius=0.06)
+
+        combined = w_goal * goal_vec + w_ref_effective * ref_vec + w_ergo * ergo_vec
+        combined_norm = np.linalg.norm(combined)
+        if combined_norm > 1e-8:
+            combined = combined / combined_norm
+        else:
+            combined = goal_vec
+
+        # 记录本步规划的 motion direction（平滑前）
+        planned_motion_directions.append(combined.copy())
+
+        # 运动方向滤波：method 2/3 时对 combined 做 EMA，接近 ref 时避免 cmd 方向跳变
+        if PLANNING_METHOD in (2, 3):
+            if motion_direction_smooth is None:
+                motion_direction_smooth = combined.copy()
+            else:
+                motion_direction_smooth = motion_direction_smooth_alpha * motion_direction_smooth + (1 - motion_direction_smooth_alpha) * combined
+                md_norm = np.linalg.norm(motion_direction_smooth)
+                if md_norm > 1e-8:
+                    motion_direction_smooth = motion_direction_smooth / md_norm
+                else:
+                    motion_direction_smooth = goal_vec.copy()
+            combined = motion_direction_smooth
+
+        adaptive_step = min(step_size, goal_dist * 0.4)
+        next_waypoint = endpoint + adaptive_step * combined
+        q_next, ik_error = cf_plan.ik_target_point(
+            next_waypoint, shouR_position_smooth, current_q, d_uar, d_lar, joint_angle_bounds, maxiter=120, ftol=1e-8)
+
+        # 机器人左臂：从 init 做增量叠加；对位移做率限平滑，避免力矩变化率过大
+        raw_displacement = next_waypoint - wristR_position_init
+        delta = np.clip(raw_displacement - displacement_cmd,
+                       -max_displacement_delta_per_step, max_displacement_delta_per_step)
+        displacement_cmd = displacement_cmd + delta
+        robot_left_position = robot_left_position_init + displacement_cmd
+        # Cmd position 平滑：method 3 时对下发的末端位置做 EMA，使轨迹更平滑、减轻接近 ref 时的突变
+        # if PLANNING_METHOD == 3:
+        #     if robot_left_position_smooth is None:
+        #         robot_left_position_smooth = robot_left_position.copy()
+        #     else:
+        #         robot_left_position_smooth = robot_cmd_smooth_alpha * robot_left_position_smooth + (1 - robot_cmd_smooth_alpha) * robot_left_position
+        #     robot_left_position = robot_left_position_smooth.copy()
+        optimized_robot_positions.append(robot_left_position.copy())
         robot_right_position = robot_right_position_init
 
         robot_left_pose_matrix = np.r_[
             np.c_[robot_left_rotation_matrix_init, robot_left_position.T], np.array([[0, 0, 0, 1]])]
         robot_right_pose_matrix = np.r_[
             np.c_[robot_right_rotation_matrix_init, robot_right_position.T], np.array([[0, 0, 0, 1]])]
-
         robot_left_pose_matrix = base2torso_matrix @ robot_left_pose_matrix
         robot_right_pose_matrix = base2torso_matrix @ robot_right_pose_matrix
-
         curi.set_tcp_servo(robot_left_pose_matrix, robot_right_pose_matrix)
-        time.sleep(0.001)  # 使用轨迹采样时间间隔
+
+        if step % 50 == 0:
+            print("Step {}: score={:.4f}, goal_dist={:.1f}mm, IK_err={:.2f}mm, displacement_cmd={}".format(
+                step, current_score, goal_dist * 1000, ik_error * 1000, displacement_cmd.round(5)))
+        time.sleep(control_dt)
 
     recorded_data = {
         'timestamps': recorded_timestamps,
@@ -893,10 +661,11 @@ if __name__ == '__main__':
         'elbow_positions': recorded_elbow_positions,
         'wrist_positions': recorded_wrist_positions
     }
-    np.save(f'{folder}/recorded_human_position.npy', recorded_data)
-    np.save(f'{folder}/optimized_robot_positions.npy', position_ergo)
-    np.save(f'{folder}/optimized_joint_angles.npy', joint_history)
-    np.save(f'{folder}/ergonomics_scores.npy', score_history)
+    np.save(os.path.join(folder, 'recorded_human_position.npy'), recorded_data)
+    np.save(os.path.join(folder, 'optimized_robot_positions.npy'), np.array(optimized_robot_positions))
+    np.save(os.path.join(folder, 'optimized_joint_angles.npy'), np.array(joint_history))
+    np.save(os.path.join(folder, 'ergonomics_scores.npy'), np.array(score_history))
+    np.save(os.path.join(folder, 'planned_motion_directions.npy'), np.array(planned_motion_directions))
 
     print(f"Recorded {len(recorded_timestamps)} position samples")
     print("轨迹执行完成！")

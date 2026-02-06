@@ -4,28 +4,14 @@ import math
 import matplotlib.pyplot as plt
 import utils
 import transformation as tsf
-import main_opt_static as mos
+from iros2025_code import main_opt_static as mos
 
-from mpl_toolkits.mplot3d import Axes3D
-from matplotlib.animation import FuncAnimation, PillowWriter
-from scipy.spatial.transform import Rotation as R
 from scipy.optimize import minimize, differential_evolution
-from itertools import product
-from matplotlib.colors import Normalize
-from matplotlib.cm import ScalarMappable, get_cmap
 from scipy.interpolate import CubicSpline
 from scipy.spatial import KDTree
 
 import sys
-import os
-import signal
 import subprocess
-import time
-
-import tkinter as tk
-from tkinter import messagebox
-
-from utils import plot_skeleton
 
 # Get ROS workspace path
 workspace_path = '/home/clover/catkin_ws'

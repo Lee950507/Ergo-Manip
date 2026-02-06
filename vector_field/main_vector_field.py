@@ -1,13 +1,11 @@
 import numpy as np
 import math
 import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D
 from matplotlib.animation import FuncAnimation, PillowWriter
 import utils
-import main_opt_static as mos
+from iros2025_code import main_opt_static as mos
 from itertools import product
 from matplotlib.colors import Normalize
-from matplotlib.cm import ScalarMappable
 
 
 def compress_bounds(joint_angle_bounds, q, optimal_q, compression_factor=0.5):

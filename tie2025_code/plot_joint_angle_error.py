@@ -1,13 +1,10 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import os
-import math
-from scipy.optimize import minimize
 from scipy.interpolate import interp1d
 import matplotlib.gridspec as gridspec
 import transformation as tsf
-import main_opt_static as mos
-import utils
+from iros2025_code import main_opt_static as mos
 
 
 def trans_global2shoulder(shoulder, elbow, wrist, arm='left'):

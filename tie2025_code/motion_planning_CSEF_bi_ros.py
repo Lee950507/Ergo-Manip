@@ -4,15 +4,9 @@ import math
 import matplotlib.pyplot as plt
 import utils
 import transformation as tsf
-import main_opt_static as mos
+from iros2025_code import main_opt_static as mos
 import message_filters
 
-from mpl_toolkits.mplot3d import Axes3D
-from matplotlib.animation import FuncAnimation, PillowWriter
-from scipy.spatial.transform import Rotation as R
-from itertools import product
-from matplotlib.colors import Normalize
-from matplotlib.cm import ScalarMappable, get_cmap
 from geometry_msgs.msg import PoseStamped
 from scipy.interpolate import CubicSpline
 from EMGProcessor import EMGProcessor
@@ -25,11 +19,6 @@ import subprocess
 import time
 import queue
 import threading
-
-import tkinter as tk
-from tkinter import messagebox
-
-from utils import plot_skeleton
 
 # 获取 ROS 工作空间的路径
 workspace_path = '/home/clover/catkin_ws'
@@ -998,7 +987,7 @@ if __name__ == '__main__':
     optimal_q = [0, 0, 0, -math.pi / 6]
 
     skeleton_joint_name, skeleton_joints, skeleton_parent_indices, skeleton_joint_local_translation = \
-        utils.read_skeleton_motion('/home/clover/Chenzui/Ergo-Manip/data/demo_2_test_chenzui_only_optitrack2hotu.npy')
+        utils.read_skeleton_motion('/data/demo_2_test_chenzui_only_optitrack2hotu.npy')
     skeleton_joint = skeleton_joints[500, :]
     global_positions, global_rotations = utils.forward_kinematics(skeleton_joint_local_translation,
                                                                   skeleton_joint, skeleton_parent_indices)

@@ -4,15 +4,9 @@ import math
 import matplotlib.pyplot as plt
 import utils
 import transformation as tsf
-import main_opt_static as mos
+from iros2025_code import main_opt_static as mos
 import message_filters
 
-from mpl_toolkits.mplot3d import Axes3D
-from matplotlib.animation import FuncAnimation, PillowWriter
-from scipy.spatial.transform import Rotation as R
-from itertools import product
-from matplotlib.colors import Normalize
-from matplotlib.cm import ScalarMappable, get_cmap
 from geometry_msgs.msg import PoseStamped
 
 import sys
@@ -21,11 +15,6 @@ import rospy
 import signal
 import subprocess
 import time
-
-import tkinter as tk
-from tkinter import messagebox
-
-from utils import plot_skeleton
 
 # 获取 ROS 工作空间的路径
 workspace_path = '/home/clover/catkin_ws'

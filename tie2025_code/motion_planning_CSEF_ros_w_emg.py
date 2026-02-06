@@ -4,17 +4,15 @@ import math
 import matplotlib.pyplot as plt
 import utils
 import transformation as tsf
-import main_opt_static as mos
+from iros2025_code import main_opt_static as mos
 import message_filters
 
-from mpl_toolkits.mplot3d import Axes3D
-from matplotlib.animation import FuncAnimation, PillowWriter
-from scipy.spatial.transform import Rotation as R
 from itertools import product
 from matplotlib.colors import Normalize
-from matplotlib.cm import ScalarMappable, get_cmap
 from geometry_msgs.msg import PoseStamped
 from scipy.interpolate import CubicSpline
+
+from EMGProcessor import EMGProcessor
 
 import sys
 import os
@@ -22,11 +20,8 @@ import rospy
 import signal
 import subprocess
 import time
-
-import tkinter as tk
-from tkinter import messagebox
-
-from utils import plot_skeleton
+import queue
+import threading
 
 # 获取 ROS 工作空间的路径
 workspace_path = '/home/clover/catkin_ws'
@@ -614,8 +609,8 @@ if __name__ == '__main__':
     vrpn_roslaunch_process = vrpn_launch_roslaunch()
 
     ## Initialization of robot end effector poses
-    robot_left_position_init = np.array([0.85, 0.15, 1.3])
-    robot_right_position_init = np.array([0.85, -0.25, 0.7])
+    robot_left_position_init = np.array([0.85, 0.2, 1.25])
+    robot_right_position_init = np.array([0.85, -0.25, 0.85])
 
     robot_left_rotation_matrix_init = np.array([[1, 0, 0], [0, 0, -1], [0, 1, 0]])
     robot_right_rotation_matrix_init = np.array([[1, 0, 0], [0, 0, 1], [0, -1, 0]])
@@ -685,7 +680,7 @@ if __name__ == '__main__':
     optimal_q = [0, 0, 0, -math.pi / 4]
 
     skeleton_joint_name, skeleton_joints, skeleton_parent_indices, skeleton_joint_local_translation = \
-        utils.read_skeleton_motion('/home/clover/Chenzui/Ergo-Manip/data/demo_2_test_chenzui_only_optitrack2hotu.npy')
+        utils.read_skeleton_motion('/data/demo_2_test_chenzui_only_optitrack2hotu.npy')
     skeleton_joint = skeleton_joints[500, :]
     global_positions, global_rotations = utils.forward_kinematics(skeleton_joint_local_translation,
                                                                   skeleton_joint, skeleton_parent_indices)
@@ -789,7 +784,8 @@ if __name__ == '__main__':
     plt.show()
 
     # 计算相对于初始位置的位移
-    position_ergo = trajectory_positions_ergo - trajectory_positions_ergo[0]
+    # position_ergo = trajectory_positions_ergo - trajectory_positions_ergo[0]
+    position_ergo = trajectory_positions_straight - trajectory_positions_straight[0]
 
     print("left_arm_current", curi.get_tcp(0))
     print("right_arm_current", curi.get_tcp(1))
@@ -799,7 +795,7 @@ if __name__ == '__main__':
     print("Waiting for initial pose messages...")
     start_time = rospy.Time.now()
     while (latest_shouR_msg is None or latest_elbowR_msg is None or latest_wristR_msg is None) and \
-            (rospy.Time.now() - start_time).to_sec() < 5.0:  # 5秒超时
+            (rospy.Time.now() - start_time).to_sec() < 3.0:  # 5秒超时
         time.sleep(0.1)
 
     if latest_shouR_msg is None or latest_elbowR_msg is None or latest_wristR_msg is None:
@@ -813,8 +809,32 @@ if __name__ == '__main__':
 
     setup_subscribers()
 
+    folder = '/home/clover/Chenzui/Ergo-Manip/data/drilling/0921/wuxi/2.3'
+    os.makedirs(folder, exist_ok=True)
+    start_time = time.time()
+    emg_processor = EMGProcessor(channel_num=5, sample_fre=200, start_time=start_time, save=True, save_folder=folder)
+    data_queue = queue.Queue()
+    threads = [
+        threading.Thread(
+            target=emg_processor.read_emg,
+            args=(data_queue,),
+            name="EMG-Reader"
+        ),
+        threading.Thread(
+            target=emg_processor.process_emg,
+            args=(data_queue,),
+            name="EMG-Processor"
+        )
+    ]
+    for t in threads:
+        t.daemon = True
+        t.start()
+    time.sleep(10.0)
+    print("EMG processor initialized")
+
     print(f"开始执行轨迹，共{len(position_ergo)}个点...")
     for i in range(len(position_ergo)):
+
         if i % 100 == 0:
             print(f"执行到第{i}个点...")
 
@@ -836,7 +856,8 @@ if __name__ == '__main__':
             recorded_shoulder_positions.append(shouR_position.copy())
             recorded_elbow_positions.append(elbowR_position.copy())
             recorded_wrist_positions.append(wristR_position.copy())
-            recorded_timestamps.append(current_timestamp.to_sec())
+            # recorded_timestamps.append(current_timestamp.to_sec())
+            recorded_timestamps.append(time.time() - start_time)
 
         # 执行机器人控制代码
         robot_left_position = robot_left_position_init + position_ergo[i]
@@ -859,15 +880,18 @@ if __name__ == '__main__':
         'elbow_positions': recorded_elbow_positions,
         'wrist_positions': recorded_wrist_positions
     }
+    np.save(f'{folder}/recorded_human_position.npy', recorded_data)
+    np.save(f'{folder}/optimized_robot_positions.npy', position_ergo)
+    np.save(f'{folder}/optimized_joint_angles.npy', joint_history)
+    np.save(f'{folder}/ergonomics_scores.npy', score_history)
 
-    # np.save('/home/clover/Chenzui/Ergo-Manip/data/joint_comparison_0918/chenzui/recorded_human_positions_3.npy',
-    #         recorded_data)
-    # np.save('/home/clover/Chenzui/Ergo-Manip/data/joint_comparison_0918/chenzui/optimized_robot_positions_3.npy',
-    #         position_ergo)
-    # np.save('/home/clover/Chenzui/Ergo-Manip/data/joint_comparison_0918/chenzui/optimized_joint_angles_3.npy',
-    #         joint_history)
     print(f"Recorded {len(recorded_timestamps)} position samples")
     print("轨迹执行完成！")
+
+    emg_processor.read_emg_flag = False
+    data_queue.join()
+    for t in threads:
+        t.join()
 
     while 1:
         interrupt = False

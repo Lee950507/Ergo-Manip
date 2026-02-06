@@ -4,8 +4,8 @@ from mpl_toolkits.mplot3d import Axes3D
 from scipy.interpolate import interp1d
 
 # 加载数据
-optimized_robot_pos = np.load('/home/clover/Chenzui/Ergo-Manip/data/joint_comparison_0918/test/optimized_robot_positions.npy', allow_pickle=True)
-recorded_human_data = np.load('/home/clover/Chenzui/Ergo-Manip/data/joint_comparison_0918/test/recorded_human_positions.npy', allow_pickle=True)
+optimized_robot_pos = np.load('/data/joint_comparison_0918/test/optimized_robot_positions.npy', allow_pickle=True)
+recorded_human_data = np.load('/data/joint_comparison_0918/test/recorded_human_positions.npy', allow_pickle=True)
 real_robot_raw = np.loadtxt("/home/clover/catkin_ws/record/test/python_curi_dual_arm_ic_2025_9_18_15_03_39/tcp_actual_position_rpy_l.txt")
 
 # 提取手腕位置数据
