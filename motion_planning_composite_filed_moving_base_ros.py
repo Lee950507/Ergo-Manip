@@ -635,7 +635,7 @@ def generate_reference_trajectory(start_pos, goal_pos, num_points=50, trajectory
                      np.outer(t ** 2, goal_pos)
 
     elif trajectory_type == 'box_carrying':
-        # Horizontal in XY to above goal, then smooth transition (quarter-circle arc) and descent to goal.
+        # Horizontal in XY to above goal, then smooth transition (quarter-circle arc, center inward) and descent to goal.
         above_goal = np.array([goal_pos[0], goal_pos[1], start_pos[2]])
         horiz_dist = np.linalg.norm(above_goal - start_pos)
         vert_dist = abs(goal_pos[2] - start_pos[2])
@@ -649,26 +649,36 @@ def generate_reference_trajectory(start_pos, goal_pos, num_points=50, trajectory
             e_z = np.array([0.0, 0.0, 1.0])
             Q1 = above_goal - r * u_h
             Q2 = above_goal - r * e_z
-
+            # 过渡圆弧圆心在轨迹内侧（角点内侧），使圆弧向 L 形内侧弯曲
+            center_inner = above_goal - r * u_h - r * e_z
+            # 圆弧：从 Q1 到 Q2，圆心在 center_inner，theta 从 pi/2 到 0
             n_h = max(2, int(num_points * 0.4))
             n_arc = max(3, int(num_points * 0.25))
             n_v = max(2, num_points - n_h - n_arc)
 
             seg1 = np.linspace(start_pos, Q1, n_h)
-            theta = np.linspace(0, np.pi / 2, n_arc)
-            center = above_goal
-            seg2 = center - r * np.outer(np.cos(theta), u_h) - r * np.outer(np.sin(theta), e_z)
+            theta = np.linspace(np.pi / 2, 0, n_arc)
+            seg2 = center_inner + r * np.outer(np.cos(theta), u_h) + r * np.outer(np.sin(theta), e_z)
             seg3 = np.linspace(Q2, goal_pos, n_v)
 
             trajectory = np.vstack([seg1, seg2, seg3])
-            if trajectory.shape[0] != num_points:
-                t_orig = np.linspace(0, 1, len(trajectory))
-                t_new = np.linspace(0, 1, num_points)
-                trajectory = np.column_stack([
-                    np.interp(t_new, t_orig, trajectory[:, 0]),
-                    np.interp(t_new, t_orig, trajectory[:, 1]),
-                    np.interp(t_new, t_orig, trajectory[:, 2])
-                ])
+            # 用路径长度参数化 + 三次样条重采样，使整条轨迹为平滑曲线
+            n_pts = len(trajectory)
+            s = np.zeros(n_pts)
+            s[1:] = np.cumsum(np.linalg.norm(np.diff(trajectory, axis=0), axis=1))
+            if s[-1] < 1e-9:
+                s = np.linspace(0, 1, n_pts)
+            else:
+                s = s / s[-1]
+            # CubicSpline 要求 x 严格单调递增，去除重复或零长段导致的 s 相等
+            s = np.maximum.accumulate(s) + np.linspace(0, 1e-10 * (n_pts - 1), n_pts)
+            s = (s - s[0]) / (s[-1] - s[0] + 1e-12)
+            s_new = np.linspace(0, 1, num_points)
+            trajectory = np.column_stack([
+                CubicSpline(s, trajectory[:, 0])(s_new),
+                CubicSpline(s, trajectory[:, 1])(s_new),
+                CubicSpline(s, trajectory[:, 2])(s_new)
+            ])
 
     else:
         raise ValueError(f"Unknown trajectory type: {trajectory_type}. "

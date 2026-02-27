@@ -19,7 +19,7 @@ import motion_planning_composite_filed_moving_base_ros as cf_plan
 _base_dir = os.path.join(_script_dir, '0204', 'chenzui')
 
 # 3D 图中可视化的 target goal 与 reference trajectory（与实验规划一致）
-task_goal_global = np.array([1.15, 0.2, 1.05])
+task_goal_global = np.array([1.15, 0.4, 1.05])
 reference_trajectory = cf_plan.generate_reference_trajectory(
     task_goal_global + np.array([0.0, 0.0, 0.3]), task_goal_global,
     num_points=100, trajectory_type='straight')
@@ -27,10 +27,10 @@ reference_trajectory = np.asarray(reference_trajectory)
 
 # 四组数据文件夹及对应方法名（1=Straight, 2=TSEF, 3=HD-SDF, 4=CF）
 FOLDER_METHODS = [
-    ('1_2', 'Method 1 (Straight)'),
-    ('2_5', 'Method 2 (TSEF)'),
-    ('3_3', 'Method 3 (HD-SDF)'),
-    ('4_2', 'Method 4 (CF)'),
+    ('5', 'Method 1 (Straight)'),
+    ('6', 'Method 2 (TSEF)'),
+    ('7', 'Method 3 (HD-SDF)'),
+    ('8_3', 'Method 4 (CF)'),
 ]
 
 COLORS = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728']
@@ -47,10 +47,10 @@ MARKERS = ['o', 's', '^', 'D']
 #
 # 示例（按需修改后运行）：
 SEGMENTS = {
-      '1_2': (10.0, 15.5),         # 方法1：取索引 0~299
-      '2_5': (10.0, 17.0),     # 方法2：取 2s~30s 之间的数据
-      '3_3': (10.0, 15.5),      # 方法3：从第 50 个点取到末尾
-      '4_2': (10.0, 17.0),            # 方法4：不截取，用全部
+      '5': (10.0, 15.3),         # 方法1：取索引 0~299
+      '6': (10.0, 18.0),     # 方法2：取 2s~30s 之间的数据
+      '7': (10.0, 15.5),      # 方法3：从第 50 个点取到末尾
+      '8_3': (10.0, 17.0),            # 方法4：不截取，用全部
 }
 # 若全部不截取，可设 SEGMENTS = None 或 {}。
 # ---------------------------------------------------------------------------
@@ -90,18 +90,24 @@ def apply_segment(data, start, end):
     seg = _segment_indices(n, data['timestamps'], start, end)
     if isinstance(seg, np.ndarray):
         # boolean mask
-        return {
+        out = {
             'wrist': data['wrist'][seg],
             'timestamps': data['timestamps'][seg],
             'joint_angles': data['joint_angles'][seg],
             'scores': data['scores'][seg],
         }
-    return {
+        if 'shoulder' in data:
+            out['shoulder'] = data['shoulder'][seg]
+        return out
+    out = {
         'wrist': data['wrist'][seg],
         'timestamps': data['timestamps'][seg],
         'joint_angles': data['joint_angles'][seg],
         'scores': data['scores'][seg],
     }
+    if 'shoulder' in data:
+        out['shoulder'] = data['shoulder'][seg]
+    return out
 
 
 def load_folder_data(folder_path):
@@ -114,16 +120,22 @@ def load_folder_data(folder_path):
     recorded = np.load(recorded_path, allow_pickle=True).item()
     joint_angles = np.load(joint_path)
     scores = np.load(scores_path)
-    # recorded: wrist_positions, timestamps (and shoulder_positions, elbow_positions)
+    # recorded: wrist_positions, shoulder_positions, timestamps (and elbow_positions)
     wrist = np.array(recorded['wrist_positions'])
+    shoulder = np.array(recorded['shoulder_positions']) if 'shoulder_positions' in recorded else None
     ts = np.array(recorded['timestamps'])
     n = min(len(ts), len(wrist), len(joint_angles), len(scores))
-    return {
+    if shoulder is not None:
+        n = min(n, len(shoulder))
+    out = {
         'wrist': wrist[:n],
         'timestamps': ts[:n],
         'joint_angles': np.asarray(joint_angles)[:n],
         'scores': np.asarray(scores).ravel()[:n],
     }
+    if shoulder is not None:
+        out['shoulder'] = shoulder[:n]
+    return out
 
 
 def load_emg_in_time_range(folder_path, t_start, t_end):
@@ -223,7 +235,7 @@ def save_comparison_stats_txt(base_dir, data_list, labels, folder_names, seg_cfg
 
 
 def plot_3d_wrist_trajectories(data_list, labels, save_path=None, task_goal_global=None, reference_trajectory=None):
-    """一张 3D 图：四条 human wrist 轨迹对比，可选绘制 target goal 与 reference trajectory。"""
+    """一张 3D 图：四种方法的 wrist 与 shoulder 轨迹对比，可选绘制 target goal 与 reference trajectory。"""
     fig = plt.figure(figsize=(10, 8))
     ax = fig.add_subplot(111, projection='3d')
     # Reference trajectory（先画，在底层）
@@ -236,19 +248,26 @@ def plot_3d_wrist_trajectories(data_list, labels, save_path=None, task_goal_glob
         g = np.asarray(task_goal_global).ravel()[:3]
         ax.scatter(g[0], g[1], g[2], c='red', s=280, marker='*', edgecolors='darkred', linewidths=2,
                    label='Target goal', zorder=10)
-    # 四种方法的手腕轨迹
+    # 四种方法：shoulder 轨迹（虚线）+ wrist 轨迹（实线）
     for i, (data, label) in enumerate(zip(data_list, labels)):
         if data is None:
             continue
+        # Shoulder 轨迹（若有）
+        if 'shoulder' in data and data['shoulder'] is not None and len(data['shoulder']) > 0:
+            sh = np.asarray(data['shoulder'])
+            ax.plot(sh[:, 0], sh[:, 1], sh[:, 2], color=COLORS[i], linewidth=2.5, linestyle='--',
+                    alpha=0.75, label=f'{label} (shoulder)')
+            ax.scatter(sh[0, 0], sh[0, 1], sh[0, 2], color=COLORS[i], s=35, marker='o', alpha=0.9)
+            ax.scatter(sh[-1, 0], sh[-1, 1], sh[-1, 2], color=COLORS[i], s=50, marker='s', alpha=0.9)
+        # Wrist 轨迹
         w = data['wrist']
-        ax.plot(w[:, 0], w[:, 1], w[:, 2], color=COLORS[i], linewidth=4, label=label, alpha=0.9)
+        ax.plot(w[:, 0], w[:, 1], w[:, 2], color=COLORS[i], linewidth=4, label=f'{label} (wrist)', alpha=0.9)
         ax.scatter(w[0, 0], w[0, 1], w[0, 2], color=COLORS[i], s=50, marker=MARKERS[i])
         ax.scatter(w[-1, 0], w[-1, 1], w[-1, 2], color=COLORS[i], s=80, marker='*', edgecolors='k', linewidths=0.5)
     ax.set_xlabel('X (m)', fontsize=14)
     ax.set_ylabel('Y (m)', fontsize=14)
     ax.set_zlabel('Z (m)', fontsize=14)
-    # ax.set_title('3D Human Wrist Trajectories Comparison', fontsize=14, fontweight='bold')
-    # ax.legend(loc='upper left', fontsize=12)
+    # ax.legend(loc='upper left', fontsize=9)
     ax.tick_params(axis='x', labelsize=14)
     ax.tick_params(axis='y', labelsize=14)
     ax.tick_params(axis='z', labelsize=14)
@@ -351,7 +370,7 @@ def run_comparison(base_dir=None, save_figures=True, segments=None):
             data_list.append(data)
         labels.append(method_label)
 
-    out_dir = os.path.join(base_dir, 'comparison_figures')
+    out_dir = os.path.join(base_dir, 'comparison_figures_moving_base')
     if save_figures:
         os.makedirs(out_dir, exist_ok=True)
 

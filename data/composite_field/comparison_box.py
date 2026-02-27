@@ -16,21 +16,22 @@ if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 import motion_planning_composite_filed_moving_base_ros as cf_plan
 
-_base_dir = os.path.join(_script_dir, '0204', 'chenzui')
+_base_dir = os.path.join(_script_dir, '0205', 'chenzui')
 
 # 3D 图中可视化的 target goal 与 reference trajectory（与实验规划一致）
-task_goal_global = np.array([1.15, 0.2, 1.05])
+# 与 run_CF_motion_planning_bi.py 一致：target goal 与 reference trajectory（box_carrying）
+task_goal_global = np.array([1.48, 0.3, 0.95])
 reference_trajectory = cf_plan.generate_reference_trajectory(
-    task_goal_global + np.array([0.0, 0.0, 0.3]), task_goal_global,
-    num_points=100, trajectory_type='straight')
+    task_goal_global + np.array([-0.03, -0.6, 0.35]), task_goal_global,
+    num_points=200, trajectory_type='box_carrying', transition_radius_ratio=0.05)
 reference_trajectory = np.asarray(reference_trajectory)
 
 # 四组数据文件夹及对应方法名（1=Straight, 2=TSEF, 3=HD-SDF, 4=CF）
 FOLDER_METHODS = [
-    ('1_2', 'Method 1 (Straight)'),
-    ('2_5', 'Method 2 (TSEF)'),
-    ('3_3', 'Method 3 (HD-SDF)'),
-    ('4_2', 'Method 4 (CF)'),
+    ('5', 'Method 1 (Straight)'),
+    ('6_2', 'Method 2 (TSEF)'),
+    ('7', 'Method 3 (HD-SDF)'),
+    ('8', 'Method 4 (CF)'),
 ]
 
 COLORS = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728']
@@ -47,10 +48,14 @@ MARKERS = ['o', 's', '^', 'D']
 #
 # 示例（按需修改后运行）：
 SEGMENTS = {
-      '1_2': (10.0, 15.5),         # 方法1：取索引 0~299
-      '2_5': (10.0, 17.0),     # 方法2：取 2s~30s 之间的数据
-      '3_3': (10.0, 15.5),      # 方法3：从第 50 个点取到末尾
-      '4_2': (10.0, 17.0),            # 方法4：不截取，用全部
+      # '1': (0.0, 8.3),         # 方法1：取索引 0~299
+      # '2': (0.0, 10),     # 方法2：取 2s~30s 之间的数据
+      # '3': (0.0, 9),      # 方法3：从第 50 个点取到末尾
+      # '4': (0.0, 10),            # 方法4：不截取，用全部
+      '5': (0.0, 9),         # 方法1：取索引 0~299
+      '6_2': (0.0, 10.0),     # 方法2：取 2s~30s 之间的数据
+      '7': (0.0, 9.0),      # 方法3：从第 50 个点取到末尾
+      '8': (0.0, 10),
 }
 # 若全部不截取，可设 SEGMENTS = None 或 {}。
 # ---------------------------------------------------------------------------
@@ -90,22 +95,36 @@ def apply_segment(data, start, end):
     seg = _segment_indices(n, data['timestamps'], start, end)
     if isinstance(seg, np.ndarray):
         # boolean mask
-        return {
+        out = {
             'wrist': data['wrist'][seg],
             'timestamps': data['timestamps'][seg],
             'joint_angles': data['joint_angles'][seg],
             'scores': data['scores'][seg],
         }
-    return {
+        if 'shoulder' in data:
+            out['shoulder'] = data['shoulder'][seg]
+        if 'robot_left' in data:
+            out['robot_left'] = data['robot_left'][seg]
+        if 'robot_right' in data:
+            out['robot_right'] = data['robot_right'][seg]
+        return out
+    out = {
         'wrist': data['wrist'][seg],
         'timestamps': data['timestamps'][seg],
         'joint_angles': data['joint_angles'][seg],
         'scores': data['scores'][seg],
     }
+    if 'shoulder' in data:
+        out['shoulder'] = data['shoulder'][seg]
+    if 'robot_left' in data:
+        out['robot_left'] = data['robot_left'][seg]
+    if 'robot_right' in data:
+        out['robot_right'] = data['robot_right'][seg]
+    return out
 
 
 def load_folder_data(folder_path):
-    """加载单个文件夹的 recorded_human_position, joint_angles, ergonomics_scores。"""
+    """加载单个文件夹的 recorded_human_position, joint_angles, ergonomics_scores, 以及双臂末端轨迹（与 run_CF_motion_planning_bi 保存格式一致）。"""
     recorded_path = os.path.join(folder_path, 'recorded_human_position.npy')
     joint_path = os.path.join(folder_path, 'optimized_joint_angles.npy')
     scores_path = os.path.join(folder_path, 'ergonomics_scores.npy')
@@ -114,16 +133,27 @@ def load_folder_data(folder_path):
     recorded = np.load(recorded_path, allow_pickle=True).item()
     joint_angles = np.load(joint_path)
     scores = np.load(scores_path)
-    # recorded: wrist_positions, timestamps (and shoulder_positions, elbow_positions)
     wrist = np.array(recorded['wrist_positions'])
     ts = np.array(recorded['timestamps'])
     n = min(len(ts), len(wrist), len(joint_angles), len(scores))
-    return {
+    left_path = os.path.join(folder_path, 'optimized_robot_positions_left.npy')
+    right_path = os.path.join(folder_path, 'optimized_robot_positions_right.npy')
+    robot_left = robot_right = None
+    if os.path.isfile(left_path) and os.path.isfile(right_path):
+        robot_left = np.asarray(np.load(left_path))
+        robot_right = np.asarray(np.load(right_path))
+        if robot_left.ndim == 2 and robot_right.ndim == 2 and robot_left.shape[1] >= 3 and robot_right.shape[1] >= 3:
+            n = min(n, len(robot_left), len(robot_right))
+    out = {
         'wrist': wrist[:n],
         'timestamps': ts[:n],
         'joint_angles': np.asarray(joint_angles)[:n],
         'scores': np.asarray(scores).ravel()[:n],
     }
+    if robot_left is not None and robot_right is not None and n > 0:
+        out['robot_left'] = robot_left[:n, :3]
+        out['robot_right'] = robot_right[:n, :3]
+    return out
 
 
 def load_emg_in_time_range(folder_path, t_start, t_end):
@@ -167,10 +197,45 @@ def load_emg_in_time_range(folder_path, t_start, t_end):
 MUSCLE_NAMES = ['Muscle 1 (Biceps)', 'Muscle 2 (Triceps)', 'Muscle 3', 'Muscle 4', 'Muscle 5']
 
 
-def save_comparison_stats_txt(base_dir, data_list, labels, folder_names, seg_cfg, txt_path=None):
+def _resample_trajectory_by_path_length(traj, num_points=100):
+    """按路径长度将轨迹重采样为 num_points 个点。traj: (N, 3)。"""
+    traj = np.asarray(traj)
+    if len(traj) < 2 or num_points < 2:
+        return traj
+    s = np.zeros(len(traj))
+    s[1:] = np.cumsum(np.linalg.norm(np.diff(traj, axis=0), axis=1))
+    if s[-1] < 1e-12:
+        return np.linspace(traj[0], traj[-1], num_points)
+    s = s / s[-1]
+    s_new = np.linspace(0, 1, num_points)
+    return np.column_stack([
+        np.interp(s_new, s, traj[:, 0]),
+        np.interp(s_new, s, traj[:, 1]),
+        np.interp(s_new, s, traj[:, 2]),
+    ])
+
+
+def _trajectory_reference_correlation(wrist_traj, ref_traj, n_sample=100):
     """
-    将四种方法的 Ergonomic scores（mean ± std）与五种肌肉的 Muscle activation smooth（mean ± std）
-    写入 txt。时间区间与各方法截取段一致（用该段内 timestamps 的 [min, max] 对齐 EMG）。
+    生成轨迹与参考轨迹的相关系数（按路径长度对齐后，对 X/Y/Z 分别求 Pearson 相关，再取平均）。
+    返回 (r_mean, r_x, r_y, r_z)，若不足两点则返回 (np.nan, np.nan, np.nan, np.nan)。
+    """
+    wrist = _resample_trajectory_by_path_length(wrist_traj, n_sample)
+    ref = _resample_trajectory_by_path_length(ref_traj, n_sample)
+    if len(wrist) < 2 or len(ref) < 2:
+        return (np.nan, np.nan, np.nan, np.nan)
+    r_x = np.corrcoef(wrist[:, 0], ref[:, 0])[0, 1] if np.std(wrist[:, 0]) > 1e-12 and np.std(ref[:, 0]) > 1e-12 else np.nan
+    r_y = np.corrcoef(wrist[:, 1], ref[:, 1])[0, 1] if np.std(wrist[:, 1]) > 1e-12 and np.std(ref[:, 1]) > 1e-12 else np.nan
+    r_z = np.corrcoef(wrist[:, 2], ref[:, 2])[0, 1] if np.std(wrist[:, 2]) > 1e-12 and np.std(ref[:, 2]) > 1e-12 else np.nan
+    valid = [r for r in [r_x, r_y, r_z] if not np.isnan(r)]
+    r_mean = np.mean(valid) if valid else np.nan
+    return (r_mean, r_x, r_y, r_z)
+
+
+def save_comparison_stats_txt(base_dir, data_list, labels, folder_names, seg_cfg, txt_path=None, reference_trajectory=None):
+    """
+    将四种方法的 Ergonomic scores（mean ± std）、五种肌肉的 Muscle activation smooth（mean ± std）、
+    以及生成轨迹与参考轨迹的相关性，写入 txt。
     """
     if txt_path is None:
         txt_path = os.path.join(base_dir, 'comparison_figures', 'comparison_stats.txt')
@@ -215,6 +280,23 @@ def save_comparison_stats_txt(base_dir, data_list, labels, folder_names, seg_cfg
             name = MUSCLE_NAMES[ch] if ch < len(MUSCLE_NAMES) else f'Muscle {ch + 1}'
             lines.append(f'  {name}: {mu:.4f} ± {std:.4f}')
     lines.append('')
+
+    # 3. 生成轨迹与参考轨迹的相关性（按路径长度对齐后 X/Y/Z 的 Pearson 相关）
+    lines.append('--- Trajectory vs Reference correlation (Pearson, after path-length alignment) ---')
+    ref_traj = np.asarray(reference_trajectory) if reference_trajectory is not None and len(reference_trajectory) > 0 else None
+    for i, (data, label, folder_name) in enumerate(zip(data_list, labels, folder_names)):
+        if data is None or len(data.get('wrist', [])) < 2:
+            lines.append(f'{label}: N/A (insufficient trajectory)')
+            continue
+        if ref_traj is None or len(ref_traj) < 2:
+            lines.append(f'{label}: N/A (no reference trajectory)')
+            continue
+        r_mean, r_x, r_y, r_z = _trajectory_reference_correlation(data['wrist'], ref_traj, n_sample=100)
+        if np.isnan(r_mean):
+            lines.append(f'{label}: N/A')
+        else:
+            lines.append(f'{label}: mean r = {r_mean:.4f}  (r_x = {r_x:.4f}, r_y = {r_y:.4f}, r_z = {r_z:.4f})')
+    lines.append('')
     lines.append('=' * 60)
 
     with open(txt_path, 'w', encoding='utf-8') as f:
@@ -223,7 +305,7 @@ def save_comparison_stats_txt(base_dir, data_list, labels, folder_names, seg_cfg
 
 
 def plot_3d_wrist_trajectories(data_list, labels, save_path=None, task_goal_global=None, reference_trajectory=None):
-    """一张 3D 图：四条 human wrist 轨迹对比，可选绘制 target goal 与 reference trajectory。"""
+    """一张 3D 图：四种方法的人体 wrist 轨迹对比，可选绘制 target goal 与 reference trajectory。"""
     fig = plt.figure(figsize=(10, 8))
     ax = fig.add_subplot(111, projection='3d')
     # Reference trajectory（先画，在底层）
@@ -236,7 +318,7 @@ def plot_3d_wrist_trajectories(data_list, labels, save_path=None, task_goal_glob
         g = np.asarray(task_goal_global).ravel()[:3]
         ax.scatter(g[0], g[1], g[2], c='red', s=280, marker='*', edgecolors='darkred', linewidths=2,
                    label='Target goal', zorder=10)
-    # 四种方法的手腕轨迹
+    # 四种方法：wrist 轨迹
     for i, (data, label) in enumerate(zip(data_list, labels)):
         if data is None:
             continue
@@ -247,8 +329,7 @@ def plot_3d_wrist_trajectories(data_list, labels, save_path=None, task_goal_glob
     ax.set_xlabel('X (m)', fontsize=14)
     ax.set_ylabel('Y (m)', fontsize=14)
     ax.set_zlabel('Z (m)', fontsize=14)
-    # ax.set_title('3D Human Wrist Trajectories Comparison', fontsize=14, fontweight='bold')
-    # ax.legend(loc='upper left', fontsize=12)
+    # ax.legend(loc='upper left', fontsize=9)
     ax.tick_params(axis='x', labelsize=14)
     ax.tick_params(axis='y', labelsize=14)
     ax.tick_params(axis='z', labelsize=14)
@@ -351,7 +432,7 @@ def run_comparison(base_dir=None, save_figures=True, segments=None):
             data_list.append(data)
         labels.append(method_label)
 
-    out_dir = os.path.join(base_dir, 'comparison_figures')
+    out_dir = os.path.join(base_dir, 'comparison_figures_box2')
     if save_figures:
         os.makedirs(out_dir, exist_ok=True)
 
@@ -362,9 +443,10 @@ def run_comparison(base_dir=None, save_figures=True, segments=None):
     plot_joint_angles_comparison(data_list, labels, save_path=save('comparison_joint_angles.png'))
     plot_ergonomics_scores_comparison(data_list, labels, save_path=save('comparison_ergonomics_scores.png'))
 
-    # 保存 ergonomic scores 与 muscle activation (smooth) 的 mean ± std 到 txt
+    # 保存 ergonomic scores、muscle activation (smooth)、轨迹-参考相关性 到 txt
     folder_names = [f[0] for f in FOLDER_METHODS]
-    save_comparison_stats_txt(base_dir, data_list, labels, folder_names, seg_cfg, txt_path=save('comparison_stats.txt'))
+    save_comparison_stats_txt(base_dir, data_list, labels, folder_names, seg_cfg,
+                              txt_path=save('comparison_stats.txt'), reference_trajectory=reference_trajectory)
 
     if save_figures:
         print(f"Figures saved to {out_dir}")
