@@ -426,7 +426,7 @@ if __name__ == '__main__':
     joint_history = []
 
     # 规划方法选择: 0=Straight(对照组), 1=TSEF, 2=SDF, 3=CF（每次运行只验证一种，通过环境变量 PLANNING_METHOD 设置）
-    PLANNING_METHOD = int(os.environ.get('PLANNING_METHOD', 3))
+    PLANNING_METHOD = int(os.environ.get('PLANNING_METHOD', 2))
     method_names = {0: 'Straight', 1: 'TSEF', 2: 'HD-SDF', 3: 'CF'}
     print("Using planning method: {} ({})".format(PLANNING_METHOD, method_names.get(PLANNING_METHOD, 'Unknown')))
 
@@ -495,20 +495,20 @@ if __name__ == '__main__':
 
     setup_subscribers()
 
-    folder = '/home/clover/Chenzui/Ergo-Manip/data/composite_field/0204/chenzui/8_3'
+    folder = '/home/clover/Chenzui/Ergo-Manip/data/composite_field/0316/chenzui/3_mid'
     os.makedirs(folder, exist_ok=True)
     start_time = time.time()
-    emg_processor = EMGProcessor(channel_num=5, sample_fre=200, start_time=start_time, save=True, save_folder=folder)
-    data_queue = queue.Queue()
-    threads = [
-        threading.Thread(target=emg_processor.read_emg, args=(data_queue,), name="EMG-Reader"),
-        threading.Thread(target=emg_processor.process_emg, args=(data_queue,), name="EMG-Processor")
-    ]
-    for t in threads:
-        t.daemon = True
-        t.start()
-    time.sleep(10.0)
-    print("EMG processor initialized")
+    # emg_processor = EMGProcessor(channel_num=5, sample_fre=200, start_time=start_time, save=True, save_folder=folder)
+    # data_queue = queue.Queue()
+    # threads = [
+    #     threading.Thread(target=emg_processor.read_emg, args=(data_queue,), name="EMG-Reader"),
+    #     threading.Thread(target=emg_processor.process_emg, args=(data_queue,), name="EMG-Processor")
+    # ]
+    # for t in threads:
+    #     t.daemon = True
+    #     t.start()
+    # time.sleep(10.0)
+    # print("EMG processor initialized")
 
     print("start robot executing...")
     for step in range(max_plan_steps):
@@ -525,6 +525,11 @@ if __name__ == '__main__':
         shouR_position = T_optitrack2robotbase[:3, :3] @ sub_shouR[:3] + T_optitrack2robotbase[:3, 3]
         elbowR_position = T_optitrack2robotbase[:3, :3] @ sub_elbowR[:3] + T_optitrack2robotbase[:3, 3]
         wristR_position = T_optitrack2robotbase[:3, :3] @ sub_wristR[:3] + T_optitrack2robotbase[:3, 3]
+
+        print("sub_shouR:", sub_shouR)
+        print("sub_robot:", sub_robot)
+        print("sub_elbowR:", sub_elbowR)
+        print("sub_wristR:", sub_wristR)
 
         # OptiTrack 数据指数移动平均平滑，减少抖动
         if shouR_position_smooth is None:
@@ -670,10 +675,10 @@ if __name__ == '__main__':
     print(f"Recorded {len(recorded_timestamps)} position samples")
     print("轨迹执行完成！")
 
-    emg_processor.read_emg_flag = False
-    data_queue.join()
-    for t in threads:
-        t.join()
+    # emg_processor.read_emg_flag = False
+    # data_queue.join()
+    # for t in threads:
+    #     t.join()
 
     while 1:
         interrupt = False
