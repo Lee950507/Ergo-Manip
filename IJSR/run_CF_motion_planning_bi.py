@@ -392,7 +392,7 @@ if __name__ == '__main__':
     optimal_q = [0, 0, 0, -math.pi / 4]
 
     skeleton_joint_name, skeleton_joints, skeleton_parent_indices, skeleton_joint_local_translation = \
-        utils.read_skeleton_motion('/home/clover/Chenzui/Ergo-Manip/data/demo_2_test_chenzui_only_optitrack2hotu.npy')
+        utils.read_skeleton_motion('/data/demo_2_test_chenzui_only_optitrack2hotu.npy')
     skeleton_joint = skeleton_joints[500, :]
     global_positions, global_rotations = utils.forward_kinematics(skeleton_joint_local_translation,
                                                                   skeleton_joint, skeleton_parent_indices)

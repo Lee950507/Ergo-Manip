@@ -4,7 +4,7 @@ import math
 import matplotlib.pyplot as plt
 import utils
 import transformation as tsf
-from iros2025_code import main_opt_static as mos
+import main_opt_static as mos
 import message_filters
 
 from itertools import product
@@ -812,25 +812,25 @@ if __name__ == '__main__':
     folder = '/home/clover/Chenzui/Ergo-Manip/data/drilling/0921/wuxi/2.3'
     os.makedirs(folder, exist_ok=True)
     start_time = time.time()
-    emg_processor = EMGProcessor(channel_num=5, sample_fre=200, start_time=start_time, save=True, save_folder=folder)
-    data_queue = queue.Queue()
-    threads = [
-        threading.Thread(
-            target=emg_processor.read_emg,
-            args=(data_queue,),
-            name="EMG-Reader"
-        ),
-        threading.Thread(
-            target=emg_processor.process_emg,
-            args=(data_queue,),
-            name="EMG-Processor"
-        )
-    ]
-    for t in threads:
-        t.daemon = True
-        t.start()
-    time.sleep(10.0)
-    print("EMG processor initialized")
+    # emg_processor = EMGProcessor(channel_num=5, sample_fre=200, start_time=start_time, save=True, save_folder=folder)
+    # data_queue = queue.Queue()
+    # threads = [
+    #     threading.Thread(
+    #         target=emg_processor.read_emg,
+    #         args=(data_queue,),
+    #         name="EMG-Reader"
+    #     ),
+    #     threading.Thread(
+    #         target=emg_processor.process_emg,
+    #         args=(data_queue,),
+    #         name="EMG-Processor"
+    #     )
+    # ]
+    # for t in threads:
+    #     t.daemon = True
+    #     t.start()
+    # time.sleep(10.0)
+    # print("EMG processor initialized")
 
     print(f"开始执行轨迹，共{len(position_ergo)}个点...")
     for i in range(len(position_ergo)):

@@ -7,14 +7,13 @@ import os
 import sys
 import numpy as np
 import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D
 
 # 脚本所在目录 = data/composite_field，项目根目录用于导入 cf_plan
 _script_dir = os.path.dirname(os.path.abspath(__file__))
 _project_root = os.path.abspath(os.path.join(_script_dir, '..', '..'))
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
-import motion_planning_composite_filed_moving_base_ros as cf_plan
+from IJSR import motion_planning_composite_filed_moving_base_ros as cf_plan
 
 _base_dir = os.path.join(_script_dir, '0205', 'chenzui')
 

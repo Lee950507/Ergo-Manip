@@ -7,34 +7,41 @@ import os
 import sys
 import numpy as np
 import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D
 
 # 脚本所在目录 = data/composite_field，项目根目录用于导入 cf_plan
 _script_dir = os.path.dirname(os.path.abspath(__file__))
 _project_root = os.path.abspath(os.path.join(_script_dir, '..', '..'))
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
-import motion_planning_composite_filed_moving_base_ros as cf_plan
+from IJSR import motion_planning_composite_filed_moving_base_ros as cf_plan
 
-_base_dir = os.path.join(_script_dir, '0204', 'chenzui')
+_base_dir = os.path.join(_script_dir, '0316', 'chenzui')
 
 # 3D 图中可视化的 target goal 与 reference trajectory（与实验规划一致）
-task_goal_global = np.array([1.15, 0.4, 1.05])
+task_goal_global = np.array([1.1, 0.4, 1.1])  # low
+# task_goal_global = np.array([1.08, 0.45, 1.1])  # high
 reference_trajectory = cf_plan.generate_reference_trajectory(
     task_goal_global + np.array([0.0, 0.0, 0.3]), task_goal_global,
     num_points=100, trajectory_type='straight')
 reference_trajectory = np.asarray(reference_trajectory)
 
 # 四组数据文件夹及对应方法名（1=Straight, 2=TSEF, 3=HD-SDF, 4=CF）
+# FOLDER_METHODS = [
+#     ('5', 'Method 1 (Straight)'),
+#     ('6', 'Method 2 (TSEF)'),
+#     ('7', 'Method 3 (HD-SDF)'),
+#     ('8_3', 'Method 4 (CF)'),
+# ]
 FOLDER_METHODS = [
-    ('5', 'Method 1 (Straight)'),
-    ('6', 'Method 2 (TSEF)'),
-    ('7', 'Method 3 (HD-SDF)'),
-    ('8_3', 'Method 4 (CF)'),
+    ('1_mid', 'Method 1 (Straight)'),
+    ('3_mid', 'Method 3 (HD-SDF)'),
+    ('4_mid', 'Method 4 (CF)'),
 ]
 
-COLORS = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728']
-MARKERS = ['o', 's', '^', 'D']
+# COLORS = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728']
+# MARKERS = ['o', 's', '^', 'D']
+COLORS = ['#1f77b4', '#2ca02c', '#d62728']
+MARKERS = ['o', '^', 'D']
 
 # ---------------------------------------------------------------------------
 # 数据段截取：对每种方法只使用指定范围内的数据，去掉首尾不需要的段落。
@@ -46,11 +53,16 @@ MARKERS = ['o', 's', '^', 'D']
 # 任一为 None 表示不限制该端，例如 (10, None) 表示从第 10 个点取到末尾，(None, 100) 表示从开头取到第 100 个点。
 #
 # 示例（按需修改后运行）：
+# SEGMENTS = {
+#       '5': (10.0, 15.3),         # 方法1：取索引 0~299
+#       '6': (10.0, 18.0),     # 方法2：取 2s~30s 之间的数据
+#       '7': (10.0, 15.5),      # 方法3：从第 50 个点取到末尾
+#       '8_3': (10.0, 17.0),            # 方法4：不截取，用全部
+# }
 SEGMENTS = {
-      '5': (10.0, 15.3),         # 方法1：取索引 0~299
-      '6': (10.0, 18.0),     # 方法2：取 2s~30s 之间的数据
-      '7': (10.0, 15.5),      # 方法3：从第 50 个点取到末尾
-      '8_3': (10.0, 17.0),            # 方法4：不截取，用全部
+      '1_mid': (0.0, 8.3),         # 方法1：取索引 0~299
+      '3_mid': (0.0, 8.0),     # 方法2：取 2s~30s 之间的数据
+      '4_mid': (0.0, 10.0),      # 方法3：从第 50 个点取到末尾
 }
 # 若全部不截取，可设 SEGMENTS = None 或 {}。
 # ---------------------------------------------------------------------------
@@ -177,6 +189,57 @@ def load_emg_in_time_range(folder_path, t_start, t_end):
 
 # 五路肌肉名称（与 EMG 通道对应，便于 txt 中阅读）
 MUSCLE_NAMES = ['Muscle 1 (Biceps)', 'Muscle 2 (Triceps)', 'Muscle 3', 'Muscle 4', 'Muscle 5']
+JOINT_NAMES = ['Joint 1', 'Joint 2', 'Joint 3', 'Joint 4']
+
+
+def _average_velocity_three_directions(positions, timestamps):
+    """计算轨迹在 X/Y/Z 三个方向上的平均速度（mean of absolute velocity），单位 m/s 或 rad/s 与 positions 一致。"""
+    positions = np.asarray(positions)
+    t = np.asarray(timestamps)
+    n = min(len(positions), len(t))
+    if n < 2:
+        return (np.nan, np.nan, np.nan)
+    dt = np.diff(t[:n])
+    dt = np.where(dt > 1e-12, dt, 1e-12)
+    vel = np.diff(positions[:n], axis=0) / dt[:, np.newaxis] if positions.ndim > 1 else np.diff(positions[:n]) / dt
+    if vel.ndim == 1:
+        vel = vel.reshape(-1, 1)
+    avg_x = np.mean(np.abs(vel[:, 0])) if vel.shape[1] > 0 else np.nan
+    avg_y = np.mean(np.abs(vel[:, 1])) if vel.shape[1] > 1 else np.nan
+    avg_z = np.mean(np.abs(vel[:, 2])) if vel.shape[1] > 2 else np.nan
+    return (avg_x, avg_y, avg_z)
+
+
+def _joint_trajectory_smoothness(q, t):
+    """
+    各关节轨迹的平滑度：使用 mean squared jerk (MSJ)，越小越平滑。
+    返回长度 4 的数组（每关节一个），单位 (rad/s^3)^2。
+    """
+    q = np.asarray(q)
+    t = np.asarray(t)
+    n = min(len(q), len(t))
+    if n < 4 or q.ndim < 2:
+        return np.full(4, np.nan)
+    out = np.zeros(min(4, q.shape[1]))
+    for j in range(out.shape[0]):
+        qj = q[:n, j]
+        dt = np.diff(t[:n])
+        dt = np.where(dt > 1e-12, dt, 1e-12)
+        v = np.diff(qj) / dt
+        if len(v) < 2:
+            out[j] = np.nan
+            continue
+        dt_mid = (t[2:n] - t[:n - 2]) * 0.5
+        dt_mid = np.where(dt_mid > 1e-12, dt_mid, 1e-12)
+        a = np.diff(v) / dt_mid
+        if len(a) < 2:
+            out[j] = np.nan
+            continue
+        dt_j = (t[3:n] - t[:n - 3]) / 3.0
+        dt_j = np.where(dt_j > 1e-12, dt_j, 1e-12)
+        jerk = np.diff(a) / dt_j
+        out[j] = np.mean(jerk ** 2)
+    return out
 
 
 def save_comparison_stats_txt(base_dir, data_list, labels, folder_names, seg_cfg, txt_path=None):
@@ -226,6 +289,35 @@ def save_comparison_stats_txt(base_dir, data_list, labels, folder_names, seg_cfg
             std = np.std(emg_segment[:, ch])
             name = MUSCLE_NAMES[ch] if ch < len(MUSCLE_NAMES) else f'Muscle {ch + 1}'
             lines.append(f'  {name}: {mu:.4f} ± {std:.4f}')
+    lines.append('')
+
+    # 3. Average velocity of shoulder trajectory in three directions (m/s)
+    lines.append('--- Average velocity of shoulder trajectory (|v| mean, m/s) ---')
+    for i, (data, label, folder_name) in enumerate(zip(data_list, labels, folder_names)):
+        if data is None or 'shoulder' not in data or data['shoulder'] is None or len(data['shoulder']) < 2:
+            lines.append(f'{label}: N/A')
+            continue
+        avg_x, avg_y, avg_z = _average_velocity_three_directions(data['shoulder'], data['timestamps'])
+        if np.isnan(avg_x):
+            lines.append(f'{label}: N/A')
+        else:
+            lines.append(f'{label}: v_x = {avg_x:.6f}, v_y = {avg_y:.6f}, v_z = {avg_z:.6f}')
+    lines.append('')
+
+    # 4. Joint trajectory smoothness (mean squared jerk, lower = smoother)
+    lines.append('--- Joint trajectory smoothness (mean squared jerk, lower = smoother) ---')
+    for i, (data, label, folder_name) in enumerate(zip(data_list, labels, folder_names)):
+        if data is None or data.get('joint_angles') is None or data.get('timestamps') is None:
+            lines.append(f'{label}: N/A')
+            continue
+        q = np.asarray(data['joint_angles'])
+        t = np.asarray(data['timestamps'])
+        if q.ndim < 2 or len(t) < 4 or len(q) < 4:
+            lines.append(f'{label}: N/A')
+            continue
+        sm = _joint_trajectory_smoothness(q, t)
+        parts = [f'{JOINT_NAMES[j]} = {sm[j]:.6e}' for j in range(min(4, len(sm))) if not np.isnan(sm[j])]
+        lines.append(f'{label}: ' + ', '.join(parts) if parts else f'{label}: N/A')
     lines.append('')
     lines.append('=' * 60)
 

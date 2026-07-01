@@ -9,7 +9,6 @@ import math
 import sys
 import numpy as np
 import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D
 
 # Project root for importing iros2025_code and motion_planning modules
 _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
@@ -17,7 +16,7 @@ if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 from scipy.spatial import KDTree
 from iros2025_code import main_opt_static as mos
-from motion_planning_composite_filed_moving_base_ros import (
+from IJSR.motion_planning_composite_filed_moving_base_ros import (
     trans_shoulder2global,
     generate_reference_trajectory,
     compute_ergonomic_vector_task_space,
@@ -35,7 +34,7 @@ JOINT_ANGLE_BOUNDS = [
 def load_data(folder):
     """Load .npy files from folder. folder is path to e.g. composite_field/0204/test/1."""
     recorded = np.load(os.path.join(folder, 'recorded_human_position.npy'), allow_pickle=True).item()
-    robot_pos = np.load(os.path.join(folder, 'optimized_robot_positions_left.npy'))
+    robot_pos = np.load(os.path.join(folder, 'optimized_robot_positions.npy'))
     joint_angles = np.load(os.path.join(folder, 'optimized_joint_angles.npy'))
     scores = np.load(os.path.join(folder, 'ergonomics_scores.npy'))
     return recorded, robot_pos, joint_angles, scores
@@ -504,8 +503,8 @@ def run_analysis(folder, save_figures=True, planning_method=3, motion_direction_
 if __name__ == '__main__':
     import sys
     base = os.path.dirname(os.path.abspath(__file__))
-    folder = os.path.join(base, '0205', 'chenzui', '8')
-    planning_method = 3
+    folder = os.path.join(base, '0316', 'chenzui', '3_mid')
+    planning_method = 2
     step_interval = None  # default: auto (~50 points)
     if len(sys.argv) > 1:
         folder = sys.argv[1]
@@ -515,3 +514,11 @@ if __name__ == '__main__':
         step_interval = int(sys.argv[3])  # motion direction sample every N steps
     run_analysis(folder, save_figures=True, planning_method=planning_method,
                  motion_direction_step_interval=step_interval)
+
+# shoulder: [ 1.56601444 -0.40607426  1.14786445]
+# elbow: [ 1.36429105 -0.31160378  1.18307883]
+# wrist: [ 1.05226499 -0.29558505  1.0983042 ]
+
+# shoulder: [ 1.50265166 -0.37376922  1.06467347]
+# elbow: [ 1.27488495 -0.2695518   1.1101194 ]
+# wrist: [ 1.00134111 -0.24058926  1.06534663]
